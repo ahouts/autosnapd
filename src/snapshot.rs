@@ -1,10 +1,10 @@
-use std::fmt::{Display, Formatter};
-use std::str::FromStr;
-
 use anyhow::{Context, Error};
 use chrono::{DateTime, Local, SecondsFormat};
 use once_cell::sync::Lazy;
 use regex::Regex;
+use std::fmt::Write;
+use std::fmt::{Display, Formatter};
+use std::str::FromStr;
 
 use crate::cfg::SNAPSHOT_PREFIX_REGEX;
 use crate::time_unit::TimeUnit;
@@ -16,6 +16,19 @@ pub struct Snapshot {
     pub prefix: CompactString,
     pub date_time: DateTime<Local>,
     pub time_unit: TimeUnit,
+}
+
+impl Snapshot {
+    pub fn is_valid(&self) -> bool {
+        let mut buff = CompactString::new();
+        if write!(&mut buff, "{}", self).is_err() {
+            return false;
+        }
+        match Snapshot::from_str(buff.as_str()) {
+            Ok(parsed) => parsed == *self,
+            Err(_) => false,
+        }
+    }
 }
 
 static SNAPSHOT_REGEX: Lazy<Regex> = Lazy::new(|| {
@@ -112,6 +125,7 @@ mod tests {
                 .with_timezone(&Local),
             time_unit: TimeUnit::Minute,
         };
+        assert!(snapshot.is_valid());
         assert_eq!(
             snapshot,
             Snapshot::from_str(format!("{}", &snapshot).as_str()).unwrap()

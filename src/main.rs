@@ -175,6 +175,16 @@ async fn take_snapshot_if_required<A: ZfsApi, C: Clock>(
         })
         .unwrap_or(true);
     if should_take_snapshot {
+        let snapshot = Snapshot {
+            volume: SmartString::from(volume),
+            prefix: SmartString::from(snapshot_prefix),
+            date_time: now,
+            time_unit,
+        };
+        if !snapshot.is_valid() {
+            log::warn!("not taking snapshot, snapshot is invalid: {}", snapshot);
+            return Ok(false);
+        }
         zfs_api
             .take_snapshot(&Snapshot {
                 volume: SmartString::from(volume),

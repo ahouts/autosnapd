@@ -56,7 +56,13 @@ impl ZfsApi for ZfsApiImpl {
                             continue;
                         }
                         match Snapshot::from_str(line.trim()) {
-                            Ok(snapshot) => results.push(snapshot),
+                            Ok(snapshot) => {
+                                if snapshot.is_valid() {
+                                    results.push(snapshot);
+                                } else {
+                                    log::warn!("snapshot is not valid, ignoring: {}", snapshot);
+                                }
+                            }
                             Err(e) => log::trace!("error parsing snapshot: {}", e),
                         }
                     }
