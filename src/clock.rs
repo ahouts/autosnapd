@@ -1,4 +1,4 @@
-use chrono::{DateTime, Local};
+use chrono::{DateTime, Local, Timelike};
 #[cfg(test)]
 use mockall::automock;
 
@@ -11,6 +11,6 @@ pub struct ClockImpl;
 
 impl Clock for ClockImpl {
     fn current(&self) -> DateTime<Local> {
-        Local::now()
+        Local::now().with_nanosecond(0).unwrap()
     }
 }

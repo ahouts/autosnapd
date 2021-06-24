@@ -21,12 +21,31 @@ pub struct Snapshot {
 impl Snapshot {
     pub fn is_valid(&self) -> bool {
         let mut buff = CompactString::new();
-        if write!(&mut buff, "{}", self).is_err() {
+        if let Err(e) = write!(&mut buff, "{}", self) {
+            log::error!("error writing snapshot to string: {}", e);
             return false;
         }
         match Snapshot::from_str(buff.as_str()) {
-            Ok(parsed) => parsed == *self,
-            Err(_) => false,
+            Ok(parsed) => {
+                let res = parsed == *self;
+                if !res {
+                    log::warn!(
+                        "parsed snapshot {:?} does not equal original snapshot {:?}: {}",
+                        parsed,
+                        self,
+                        self,
+                    );
+                }
+                res
+            }
+            Err(e) => {
+                log::warn!(
+                    "unable to parse snapshot {:?} from snapshot info: {}",
+                    self,
+                    e
+                );
+                false
+            }
         }
     }
 }
