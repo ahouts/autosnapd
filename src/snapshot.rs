@@ -21,7 +21,7 @@ pub struct Snapshot {
 static SNAPSHOT_REGEX: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
         format!(
-            r"^([a-zA-Z0-9 ,_.:/]+)@({})_([-0-9T:.TZ+]+)_([a-z]+)$",
+            r"^([-a-zA-Z0-9 ,_.:/]+)@({})_([-0-9T:.TZ+]+)_([a-z]+)$",
             SNAPSHOT_PREFIX_REGEX
         )
         .as_str(),
@@ -73,7 +73,7 @@ mod tests {
     fn from_str() {
         assert_eq!(
             Snapshot {
-                volume: CompactString::from("zroot/test::dt,1._ /volume123"),
+                volume: CompactString::from("zroot/test::dt,1._- /volume123"),
                 prefix: CompactString::from("autosnap"),
                 date_time: Utc
                     .from_utc_datetime(&NaiveDate::from_ymd(2021, 6, 14).and_hms(3, 21, 1))
@@ -81,7 +81,7 @@ mod tests {
                 time_unit: TimeUnit::Hour
             },
             Snapshot::from_str(
-                "zroot/test::dt,1._ /volume123@autosnap_2021-06-14T03:21:01Z_hourly"
+                "zroot/test::dt,1._- /volume123@autosnap_2021-06-14T03:21:01Z_hourly"
             )
             .unwrap()
         )
