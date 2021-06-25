@@ -146,7 +146,12 @@ async fn maybe_remove_snapshots<A: ZfsApi>(
     let total_snapshots = group.len() + if snapshot_taken { 1 } else { 0 };
 
     if total_snapshots > desired_count as usize {
-        let to_remove = group.split_at(total_snapshots - desired_count as usize).0;
+        let to_remove = group
+            .split_at(usize::min(
+                total_snapshots - desired_count as usize,
+                group.len(),
+            ))
+            .0;
         for snapshot in to_remove {
             zfs_api
                 .remove_snapshot(snapshot)
@@ -335,5 +340,82 @@ mod tests {
         )
         .await
         .unwrap());
+    }
+
+    #[tokio::test]
+    async fn maybe_remove_snapshots_desired_count_reduced_snapshot_taken() {
+        let mut mock_api = MockZfsApi::new();
+
+        mock_api
+            .expect_remove_snapshot()
+            .times(1)
+            .with(eq(snapshot(1)))
+            .returning(|_| Box::pin(async { Ok(()) }));
+
+        maybe_remove_snapshots(&mock_api, &[snapshot(1)], 0, true)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn maybe_remove_snapshots_new_snapshot() {
+        let mock_api = MockZfsApi::new();
+
+        maybe_remove_snapshots(&mock_api, &[snapshot(1)], 2, true)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn maybe_remove_snapshots_new_snapshot_at_limit() {
+        let mut mock_api = MockZfsApi::new();
+
+        mock_api
+            .expect_remove_snapshot()
+            .times(1)
+            .with(eq(snapshot(1)))
+            .returning(|_| Box::pin(async { Ok(()) }));
+
+        maybe_remove_snapshots(&mock_api, &[snapshot(1)], 1, true)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn maybe_remove_snapshots_some_snapshots() {
+        let mut mock_api = MockZfsApi::new();
+
+        mock_api
+            .expect_remove_snapshot()
+            .times(1)
+            .with(eq(snapshot(1)))
+            .returning(|_| Box::pin(async { Ok(()) }));
+
+        mock_api
+            .expect_remove_snapshot()
+            .times(1)
+            .with(eq(snapshot(2)))
+            .returning(|_| Box::pin(async { Ok(()) }));
+
+        maybe_remove_snapshots(
+            &mock_api,
+            &[snapshot(1), snapshot(2), snapshot(3)],
+            1,
+            false,
+        )
+        .await
+        .unwrap();
+    }
+
+    fn snapshot(id: i64) -> Snapshot {
+        Snapshot {
+            volume: CompactString::from(format!("{}", id)),
+            prefix: CompactString::from("zsnap"),
+            date_time: Local
+                .from_local_datetime(&NaiveDate::from_ymd(2021, 5, 6).and_hms(7, 1, 1))
+                .unwrap()
+                + chrono::Duration::seconds(id),
+            time_unit: TimeUnit::Minute,
+        }
     }
 }
