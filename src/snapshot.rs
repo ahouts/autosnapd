@@ -1,3 +1,6 @@
+use crate::cfg::SNAPSHOT_PREFIX_REGEX;
+use crate::time_unit::TimeUnit;
+use crate::CompactString;
 use anyhow::{Context, Error};
 use chrono::{DateTime, Local, SecondsFormat};
 use once_cell::sync::Lazy;
@@ -5,10 +8,6 @@ use regex::Regex;
 use std::fmt::Write;
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
-
-use crate::cfg::SNAPSHOT_PREFIX_REGEX;
-use crate::time_unit::TimeUnit;
-use crate::CompactString;
 
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub struct Snapshot {

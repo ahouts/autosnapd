@@ -1,18 +1,16 @@
-use std::path::{Path, PathBuf};
-use std::process::Stdio;
-use std::str::FromStr;
-
+use crate::snapshot::Snapshot;
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
+use futures::Future;
 #[cfg(test)]
 use mockall::automock;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt};
-use tokio::{io::BufReader, process::Command};
-
-use crate::snapshot::Snapshot;
-use futures::Future;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::process::Stdio;
+use std::str::FromStr;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt};
 use tokio::process::ChildStdout;
+use tokio::{io::BufReader, process::Command};
 
 #[async_trait]
 #[cfg_attr(test, automock)]
