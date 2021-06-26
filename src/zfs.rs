@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::str::FromStr;
 
@@ -101,7 +101,7 @@ async fn exec<
     T: Send + 'static,
     F: FnOnce(ChildStdout) -> Pin<Box<dyn Future<Output = T> + Send>>,
 >(
-    zfs_path: &PathBuf,
+    zfs_path: &Path,
     args: &[&str],
     f: F,
 ) -> Result<T> {
