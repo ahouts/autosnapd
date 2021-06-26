@@ -25,5 +25,7 @@ jobs:
         key: ${{ runner.os }}
     - name: Build
       run: cargo build --verbose
+    - name: Clippy
+      run: cargo clippy -- -W clippy::all -D warnings
     - name: Run tests
       run: cargo test --verbose
