@@ -23,7 +23,7 @@ mod time_unit;
 mod zfs;
 
 #[derive(StructOpt)]
-#[structopt(name = "zsnapd", about = "zfs snapshot daemon")]
+#[structopt(name = "autosnapd", about = "zfs snapshot daemon")]
 struct Opt {
     #[structopt(short, long)]
     config: PathBuf,
@@ -410,7 +410,7 @@ mod tests {
     fn snapshot(id: i64) -> Snapshot {
         Snapshot {
             volume: CompactString::from(format!("{}", id)),
-            prefix: CompactString::from("zsnap"),
+            prefix: CompactString::from("autosnap"),
             date_time: Local
                 .from_local_datetime(&NaiveDate::from_ymd(2021, 5, 6).and_hms(7, 1, 1))
                 .unwrap()

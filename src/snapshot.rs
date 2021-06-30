@@ -123,13 +123,13 @@ mod tests {
         assert_eq!(
             Snapshot {
                 volume: CompactString::from("zroot"),
-                prefix: CompactString::from("zsnap"),
+                prefix: CompactString::from("autosnap"),
                 date_time: Utc
                     .from_utc_datetime(&NaiveDate::from_ymd(2021, 6, 14).and_hms(4, 21, 1))
                     .with_timezone(&Local),
                 time_unit: TimeUnit::Year
             },
-            Snapshot::from_str("zroot@zsnap_2021-06-14T03:21:01-01:00_yearly").unwrap()
+            Snapshot::from_str("zroot@autosnap_2021-06-14T03:21:01-01:00_yearly").unwrap()
         )
     }
 
@@ -137,7 +137,7 @@ mod tests {
     fn round_trip() {
         let snapshot = Snapshot {
             volume: CompactString::from("zroot/test::dt,1._ /volume123"),
-            prefix: CompactString::from("zsnap"),
+            prefix: CompactString::from("autosnap"),
             date_time: Utc
                 .from_utc_datetime(&NaiveDate::from_ymd(2021, 6, 14).and_hms(3, 21, 1))
                 .with_timezone(&Local),

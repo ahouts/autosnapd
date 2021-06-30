@@ -28,7 +28,7 @@ impl SnapshotPrefix {
 
 impl Default for SnapshotPrefix {
     fn default() -> Self {
-        SnapshotPrefix(CompactString::from("zsnap"))
+        SnapshotPrefix(CompactString::from("autosnap"))
     }
 }
 
