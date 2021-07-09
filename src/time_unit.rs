@@ -97,35 +97,29 @@ mod tests {
 
     #[test]
     fn add_month() {
-        let dt = Utc
-            .from_local_datetime(&NaiveDateTime::new(
-                NaiveDate::from_ymd(2021, 11, 12),
-                NaiveTime::from_hms(2, 3, 4),
-            ))
-            .unwrap();
+        let dt = Utc.from_utc_datetime(&NaiveDateTime::new(
+            NaiveDate::from_ymd(2021, 11, 12),
+            NaiveTime::from_hms(2, 3, 4),
+        ));
         assert_eq!(12, (dt + TimeUnit::Month).month())
     }
 
     #[test]
     fn add_month_year_rollover() {
-        let dt = Utc
-            .from_local_datetime(&NaiveDateTime::new(
-                NaiveDate::from_ymd(2021, 12, 12),
-                NaiveTime::from_hms(2, 3, 4),
-            ))
-            .unwrap();
+        let dt = Utc.from_utc_datetime(&NaiveDateTime::new(
+            NaiveDate::from_ymd(2021, 12, 12),
+            NaiveTime::from_hms(2, 3, 4),
+        ));
         assert_eq!(1, (dt + TimeUnit::Month).month());
         assert_eq!(2022, (dt + TimeUnit::Month).year());
     }
 
     #[test]
     fn add_year_skip_year() {
-        let dt = Utc
-            .from_local_datetime(&NaiveDateTime::new(
-                NaiveDate::from_ymd(2024, 12, 31),
-                NaiveTime::from_hms(2, 3, 4),
-            ))
-            .unwrap();
+        let dt = Utc.from_utc_datetime(&NaiveDateTime::new(
+            NaiveDate::from_ymd(2024, 12, 31),
+            NaiveTime::from_hms(2, 3, 4),
+        ));
         assert_eq!(
             NaiveDate::from_ymd(2026, 1, 1),
             (dt + TimeUnit::Year).date().naive_utc()
