@@ -2,7 +2,7 @@ use crate::cfg::SNAPSHOT_PREFIX_REGEX;
 use crate::time_unit::TimeUnit;
 use crate::CompactString;
 use anyhow::{Context, Error};
-use chrono::{DateTime, Local, SecondsFormat};
+use chrono::{DateTime, SecondsFormat, Utc};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use std::fmt::Write;
@@ -13,7 +13,7 @@ use std::str::FromStr;
 pub struct Snapshot {
     pub volume: CompactString,
     pub prefix: CompactString,
-    pub date_time: DateTime<Local>,
+    pub date_time: DateTime<Utc>,
     pub time_unit: TimeUnit,
 }
 
@@ -76,7 +76,7 @@ impl FromStr for Snapshot {
             prefix: CompactString::from(prefix),
             date_time: DateTime::parse_from_rfc3339(date_time)
                 .with_context(|| format!("invalid date time: {}", date_time))?
-                .with_timezone(&Local),
+                .with_timezone(&Utc),
             time_unit: TimeUnit::from_str(time_unit).with_context(|| "error parsing time unit")?,
         })
     }
@@ -89,7 +89,7 @@ impl Display for Snapshot {
             "{}@{}_{}_{}",
             self.volume,
             self.prefix,
-            self.date_time.to_rfc3339_opts(SecondsFormat::Secs, false),
+            self.date_time.to_rfc3339_opts(SecondsFormat::Secs, true),
             self.time_unit
         )
     }
@@ -108,7 +108,7 @@ mod tests {
                 prefix: CompactString::from("autosnap"),
                 date_time: Utc
                     .from_utc_datetime(&NaiveDate::from_ymd(2021, 6, 14).and_hms(3, 21, 1))
-                    .with_timezone(&Local),
+                    .with_timezone(&Utc),
                 time_unit: TimeUnit::Hour
             },
             Snapshot::from_str(
@@ -126,7 +126,7 @@ mod tests {
                 prefix: CompactString::from("autosnap"),
                 date_time: Utc
                     .from_utc_datetime(&NaiveDate::from_ymd(2021, 6, 14).and_hms(4, 21, 1))
-                    .with_timezone(&Local),
+                    .with_timezone(&Utc),
                 time_unit: TimeUnit::Year
             },
             Snapshot::from_str("zroot@autosnap_2021-06-14T03:21:01-01:00_yearly").unwrap()
@@ -140,7 +140,7 @@ mod tests {
             prefix: CompactString::from("autosnap"),
             date_time: Utc
                 .from_utc_datetime(&NaiveDate::from_ymd(2021, 6, 14).and_hms(3, 21, 1))
-                .with_timezone(&Local),
+                .with_timezone(&Utc),
             time_unit: TimeUnit::Minute,
         };
         assert!(snapshot.is_valid());
