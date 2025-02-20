@@ -110,9 +110,9 @@ pub struct Config {
     pub volume_config: HashMap<CompactString, VolumeConfig>,
 }
 
-pub fn load_config(data: &[u8]) -> Result<Config> {
+pub fn load_config(data: &str) -> Result<Config> {
     let raw_cfg: RawConfig =
-        toml::from_slice(data).with_context(|| "error parsing configuration file")?;
+        toml::from_str(data).with_context(|| "error parsing configuration file")?;
 
     fn apply_defaults(cfg: &RawBaseVolumeConfig, defaults: &VolumeConfig) -> VolumeConfig {
         VolumeConfig {
@@ -211,7 +211,7 @@ daily = 7
                 .into_iter()
                 .collect::<HashMap<CompactString, VolumeConfig>>()
             },
-            load_config(TEST_CONFIG.as_bytes()).unwrap()
+            load_config(TEST_CONFIG).unwrap()
         );
     }
 
@@ -222,7 +222,7 @@ daily = 7
                 snapshot_prefix: Default::default(),
                 volume_config: Default::default()
             },
-            load_config(&[]).unwrap()
+            load_config("").unwrap()
         );
     }
 

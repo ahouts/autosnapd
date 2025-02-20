@@ -107,7 +107,8 @@ mod tests {
                 volume: CompactString::from("zroot/test::dt,1._- /volume123"),
                 prefix: CompactString::from("autosnap"),
                 date_time: Utc
-                    .from_utc_datetime(&NaiveDate::from_ymd(2021, 6, 14).and_hms(3, 21, 1))
+                    .from_utc_datetime(&NaiveDate::from_ymd_opt(2021, 6, 14).unwrap()
+                        .and_hms_opt(3, 21, 1).unwrap())
                     .with_timezone(&Utc),
                 time_unit: TimeUnit::Hour
             },
@@ -125,7 +126,8 @@ mod tests {
                 volume: CompactString::from("zroot"),
                 prefix: CompactString::from("autosnap"),
                 date_time: Utc
-                    .from_utc_datetime(&NaiveDate::from_ymd(2021, 6, 14).and_hms(4, 21, 1))
+                    .from_utc_datetime(&NaiveDate::from_ymd_opt(2021, 6, 14).unwrap()
+                        .and_hms_opt(4, 21, 1).unwrap())
                     .with_timezone(&Utc),
                 time_unit: TimeUnit::Year
             },
@@ -139,7 +141,8 @@ mod tests {
             volume: CompactString::from("zroot/test::dt,1._ /volume123"),
             prefix: CompactString::from("autosnap"),
             date_time: Utc
-                .from_utc_datetime(&NaiveDate::from_ymd(2021, 6, 14).and_hms(3, 21, 1))
+                .from_utc_datetime(&NaiveDate::from_ymd_opt(2021, 6, 14).unwrap()
+                    .and_hms_opt(3, 21, 1).unwrap())
                 .with_timezone(&Utc),
             time_unit: TimeUnit::Minute,
         };

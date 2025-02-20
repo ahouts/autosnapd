@@ -5,31 +5,31 @@ authors = ["Andrew Houts <ahouts4@gmail.com>"]
 edition = "2021"
 
 [dependencies]
-toml = "0.5"
-anyhow = "1.0"
+toml = "0.8"
+anyhow = "1"
 log = "0.4"
-env_logger = "0.9"
+env_logger = "0.11"
 structopt = "0.3"
 async-trait = "0.1"
 chrono = "0.4"
-once_cell = "1.8"
-regex = "1.5"
+once_cell = "1"
+regex = "1"
 slice-group-by = "0.3"
 futures = "0.3"
-strum = "0.23"
-strum_macros = "0.23"
+strum = "0.27"
+strum_macros = "0.27"
 
 [dependencies.smartstring]
-version = "0.2"
+version = "1"
 features = ["serde"]
 
 [dependencies.tokio]
-version = "1.6"
+version = "1"
 features = ["rt", "time", "macros", "fs", "process", "io-util", "signal"]
 
 [dependencies.serde]
-version = "1.0"
+version = "1"
 features = ["derive"]
 
 [dev-dependencies]
-mockall = "0.10"
+mockall = "0.13"

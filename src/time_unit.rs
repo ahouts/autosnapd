@@ -47,19 +47,25 @@ impl<Tz: TimeZone> Add<TimeUnit> for DateTime<Tz> {
 
     fn add(self, time_unit: TimeUnit) -> Self::Output {
         fn number_of_days_in_month(year: i32, month: u32) -> i64 {
-            if month == 12 {
-                NaiveDate::from_ymd(year + 1, 1, 1)
+            let next_month = if month == 12 {
+                NaiveDate::from_ymd_opt(year + 1, 1, 1)
             } else {
-                NaiveDate::from_ymd(year, month + 1, 1)
-            }
-            .signed_duration_since(NaiveDate::from_ymd(year, month, 1))
-            .num_days()
+                NaiveDate::from_ymd_opt(year, month + 1, 1)
+            }.expect("valid date");
+
+            let current_month = NaiveDate::from_ymd_opt(year, month, 1)
+                .expect("valid date");
+
+            next_month.signed_duration_since(current_month).num_days()
         }
 
         fn number_of_days_in_year(year: i32) -> i64 {
-            NaiveDate::from_ymd(year + 1, 1, 1)
-                .signed_duration_since(NaiveDate::from_ymd(year, 1, 1))
-                .num_days()
+            let next_year = NaiveDate::from_ymd_opt(year + 1, 1, 1)
+                .expect("valid date");
+            let current_year = NaiveDate::from_ymd_opt(year, 1, 1)
+                .expect("valid date");
+
+            next_year.signed_duration_since(current_year).num_days()
         }
 
         match time_unit {
@@ -98,8 +104,8 @@ mod tests {
     #[test]
     fn add_month() {
         let dt = Utc.from_utc_datetime(&NaiveDateTime::new(
-            NaiveDate::from_ymd(2021, 11, 12),
-            NaiveTime::from_hms(2, 3, 4),
+            NaiveDate::from_ymd_opt(2021, 11, 12).unwrap(),
+            NaiveTime::from_hms_opt(2, 3, 4).unwrap(),
         ));
         assert_eq!(12, (dt + TimeUnit::Month).month())
     }
@@ -107,8 +113,8 @@ mod tests {
     #[test]
     fn add_month_year_rollover() {
         let dt = Utc.from_utc_datetime(&NaiveDateTime::new(
-            NaiveDate::from_ymd(2021, 12, 12),
-            NaiveTime::from_hms(2, 3, 4),
+            NaiveDate::from_ymd_opt(2021, 12, 12).unwrap(),
+            NaiveTime::from_hms_opt(2, 3, 4).unwrap(),
         ));
         assert_eq!(1, (dt + TimeUnit::Month).month());
         assert_eq!(2022, (dt + TimeUnit::Month).year());
@@ -117,12 +123,12 @@ mod tests {
     #[test]
     fn add_year_skip_year() {
         let dt = Utc.from_utc_datetime(&NaiveDateTime::new(
-            NaiveDate::from_ymd(2024, 12, 31),
-            NaiveTime::from_hms(2, 3, 4),
+            NaiveDate::from_ymd_opt(2024, 12, 31).unwrap(),
+            NaiveTime::from_hms_opt(2, 3, 4).unwrap(),
         ));
         assert_eq!(
-            NaiveDate::from_ymd(2026, 1, 1),
-            (dt + TimeUnit::Year).date().naive_utc()
+            NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+            (dt + TimeUnit::Year).date_naive()
         )
     }
 }
