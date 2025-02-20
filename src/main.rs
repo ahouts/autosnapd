@@ -86,7 +86,7 @@ async fn handle_snapshots_for_all_volumes<A: ZfsApi, C: Clock>(
     log::debug!("handling snapshots for all volumes");
     for (volume, config) in cfg.volume_config.iter() {
         log::debug!("handling snapshots for volume {}: {:?}", volume, config);
-        handle_snapshots_for_volume(zfs_api, clock, &volume, config, cfg).await?;
+        handle_snapshots_for_volume(zfs_api, clock, volume, config, cfg).await?;
     }
 
     drop(guard);
@@ -121,7 +121,7 @@ async fn handle_snapshots_for_volume<A: ZfsApi, C: Clock>(
             take_snapshot_if_required(
                 zfs_api,
                 clock,
-                &volume,
+                volume,
                 group,
                 time_unit,
                 config.snapshot_prefix.0.as_str(),
