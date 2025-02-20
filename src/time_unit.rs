@@ -51,19 +51,17 @@ impl<Tz: TimeZone> Add<TimeUnit> for DateTime<Tz> {
                 NaiveDate::from_ymd_opt(year + 1, 1, 1)
             } else {
                 NaiveDate::from_ymd_opt(year, month + 1, 1)
-            }.expect("valid date");
+            }
+            .expect("valid date");
 
-            let current_month = NaiveDate::from_ymd_opt(year, month, 1)
-                .expect("valid date");
+            let current_month = NaiveDate::from_ymd_opt(year, month, 1).expect("valid date");
 
             next_month.signed_duration_since(current_month).num_days()
         }
 
         fn number_of_days_in_year(year: i32) -> i64 {
-            let next_year = NaiveDate::from_ymd_opt(year + 1, 1, 1)
-                .expect("valid date");
-            let current_year = NaiveDate::from_ymd_opt(year, 1, 1)
-                .expect("valid date");
+            let next_year = NaiveDate::from_ymd_opt(year + 1, 1, 1).expect("valid date");
+            let current_year = NaiveDate::from_ymd_opt(year, 1, 1).expect("valid date");
 
             next_year.signed_duration_since(current_year).num_days()
         }

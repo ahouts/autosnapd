@@ -50,6 +50,13 @@ impl<'de> Deserialize<'de> for SnapshotPrefix {
     }
 }
 
+#[derive(Debug, Eq, PartialEq, Deserialize, Clone)]
+pub struct RemoteConfig {
+    pub host: CompactString,
+    pub remote_path: CompactString,
+    pub local_path: CompactString,
+}
+
 #[derive(Deserialize)]
 struct RawConfig {
     #[serde(default)]
@@ -74,6 +81,7 @@ struct RawVolumeConfig {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawBaseVolumeConfig {
+    remote: Option<RemoteConfig>,
     minutely: Option<u16>,
     hourly: Option<u16>,
     daily: Option<u16>,
@@ -88,6 +96,7 @@ pub struct VolumeConfig {
     pub daily: u16,
     pub monthly: u16,
     pub yearly: u16,
+    pub remote: Option<RemoteConfig>,
 }
 
 impl Index<TimeUnit> for VolumeConfig {
@@ -121,6 +130,7 @@ pub fn load_config(data: &str) -> Result<Config> {
             daily: cfg.daily.unwrap_or(defaults.daily),
             monthly: cfg.monthly.unwrap_or(defaults.monthly),
             yearly: cfg.yearly.unwrap_or(defaults.yearly),
+            remote: cfg.remote.clone().or_else(|| defaults.remote.clone()),
         }
     }
 
@@ -235,5 +245,54 @@ daily = 7
                 .to_string()
                 .as_str()
         );
+    }
+
+    #[test]
+    fn load_config_with_remote() {
+        const TEST_CONFIG: &str = r#"
+snapshot_prefix = "asdf"
+
+[templates.remote_backup]
+minutely = 1
+hourly = 2
+remote = { host = "server1.example.com", remote_path = "/data/backup", local_path = "/mnt/backup" }
+
+["volume1/remote"]
+template = "remote_backup"
+hourly = 4
+
+["volume2/remote"]
+remote = { host = "server2.example.com", remote_path = "/var/lib/data", local_path = "/mnt/data2" }
+daily = 7
+        "#;
+
+        let config = load_config(TEST_CONFIG).unwrap();
+
+        // Check remote config from template
+        let vol1_cfg = config.volume_config.get("volume1/remote").unwrap();
+        assert_eq!(
+            vol1_cfg.remote.as_ref().unwrap().host,
+            "server1.example.com"
+        );
+        assert_eq!(
+            vol1_cfg.remote.as_ref().unwrap().remote_path,
+            "/data/backup"
+        );
+        assert_eq!(vol1_cfg.remote.as_ref().unwrap().local_path, "/mnt/backup");
+        assert_eq!(vol1_cfg.hourly, 4);
+        assert_eq!(vol1_cfg.minutely, 1);
+
+        // Check direct remote config
+        let vol2_cfg = config.volume_config.get("volume2/remote").unwrap();
+        assert_eq!(
+            vol2_cfg.remote.as_ref().unwrap().host,
+            "server2.example.com"
+        );
+        assert_eq!(
+            vol2_cfg.remote.as_ref().unwrap().remote_path,
+            "/var/lib/data"
+        );
+        assert_eq!(vol2_cfg.remote.as_ref().unwrap().local_path, "/mnt/data2");
+        assert_eq!(vol2_cfg.daily, 7);
     }
 }

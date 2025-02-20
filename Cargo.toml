@@ -1,6 +1,6 @@
 [package]
 name = "autosnapd"
-version = "0.2.1"
+version = "0.3.0"
 authors = ["Andrew Houts <ahouts4@gmail.com>"]
 edition = "2021"
 
@@ -34,3 +34,4 @@ features = ["derive"]
 
 [dev-dependencies]
 mockall = "0.13"
+tempfile = "3"

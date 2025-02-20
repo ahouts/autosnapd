@@ -18,6 +18,7 @@ type CompactString = SmartString<LazyCompact>;
 
 mod cfg;
 mod clock;
+mod remote;
 mod snapshot;
 mod time_unit;
 mod zfs;
@@ -100,6 +101,27 @@ async fn handle_snapshots_for_volume<A: ZfsApi, C: Clock>(
     volume_config: &VolumeConfig,
     config: &Config,
 ) -> Result<()> {
+    if let Some(remote) = &volume_config.remote {
+        match remote::sync_remote(&remote.host, &remote.remote_path, &remote.local_path).await {
+            Ok(_) => log::debug!(
+                "successfully synced remote {}:{} to {}",
+                remote.host,
+                remote.remote_path,
+                &remote.local_path
+            ),
+            Err(e) => {
+                log::error!(
+                    "failed to sync remote {}:{} to {}: {}",
+                    remote.host,
+                    remote.remote_path,
+                    &remote.local_path,
+                    e
+                );
+                return Ok(());
+            }
+        }
+    }
+
     let mut snapshots = zfs_api.snapshots(volume).await?;
     snapshots.sort_by_key(|snapshot| snapshot.date_time);
     snapshots.sort_by_key(|snapshot| snapshot.time_unit);
@@ -219,8 +241,12 @@ mod tests {
         let mut mock_clock = MockClock::new();
 
         mock_clock.expect_current().times(1).returning(move || {
-            Utc.from_utc_datetime(&NaiveDate::from_ymd_opt(2021, 5, 6).unwrap()
-                .and_hms_opt(7, 3, 1).unwrap())
+            Utc.from_utc_datetime(
+                &NaiveDate::from_ymd_opt(2021, 5, 6)
+                    .unwrap()
+                    .and_hms_opt(7, 3, 1)
+                    .unwrap(),
+            )
         });
 
         mock_api
@@ -229,8 +255,12 @@ mod tests {
             .with(eq(Snapshot {
                 volume: CompactString::from("zvol/abc/a"),
                 prefix: CompactString::from("abc123"),
-                date_time: Utc.from_utc_datetime(&NaiveDate::from_ymd_opt(2021, 5, 6).unwrap()
-                    .and_hms_opt(7, 3, 1).unwrap()),
+                date_time: Utc.from_utc_datetime(
+                    &NaiveDate::from_ymd_opt(2021, 5, 6)
+                        .unwrap()
+                        .and_hms_opt(7, 3, 1)
+                        .unwrap(),
+                ),
                 time_unit: TimeUnit::Minute,
             }))
             .returning(|_| Box::pin(async { Ok(()) }));
@@ -243,15 +273,23 @@ mod tests {
                 Snapshot {
                     volume: CompactString::from("zvol/abc/a"),
                     prefix: CompactString::from("abc312"),
-                    date_time: Utc.from_utc_datetime(&NaiveDate::from_ymd_opt(2021, 5, 6).unwrap()
-                        .and_hms_opt(7, 1, 1).unwrap()),
+                    date_time: Utc.from_utc_datetime(
+                        &NaiveDate::from_ymd_opt(2021, 5, 6)
+                            .unwrap()
+                            .and_hms_opt(7, 1, 1)
+                            .unwrap()
+                    ),
                     time_unit: TimeUnit::Minute,
                 },
                 Snapshot {
                     volume: CompactString::from("zvol/abc/a"),
                     prefix: CompactString::from("abc321"),
-                    date_time: Utc.from_utc_datetime(&NaiveDate::from_ymd_opt(2021, 5, 6).unwrap()
-                        .and_hms_opt(7, 2, 1).unwrap()),
+                    date_time: Utc.from_utc_datetime(
+                        &NaiveDate::from_ymd_opt(2021, 5, 6)
+                            .unwrap()
+                            .and_hms_opt(7, 2, 1)
+                            .unwrap()
+                    ),
                     time_unit: TimeUnit::Minute,
                 },
             ],
@@ -268,8 +306,12 @@ mod tests {
         let mut mock_clock = MockClock::new();
 
         mock_clock.expect_current().times(1).returning(move || {
-            Utc.from_utc_datetime(&NaiveDate::from_ymd_opt(2021, 5, 6).unwrap()
-                .and_hms_opt(7, 3, 1).unwrap())
+            Utc.from_utc_datetime(
+                &NaiveDate::from_ymd_opt(2021, 5, 6)
+                    .unwrap()
+                    .and_hms_opt(7, 3, 1)
+                    .unwrap(),
+            )
         });
 
         mock_api
@@ -278,8 +320,12 @@ mod tests {
             .with(eq(Snapshot {
                 volume: CompactString::from("zvol/abc/a"),
                 prefix: CompactString::from("abc123"),
-                date_time: Utc.from_utc_datetime(&NaiveDate::from_ymd_opt(2021, 5, 6).unwrap()
-                    .and_hms_opt(7, 3, 1).unwrap()),
+                date_time: Utc.from_utc_datetime(
+                    &NaiveDate::from_ymd_opt(2021, 5, 6)
+                        .unwrap()
+                        .and_hms_opt(7, 3, 1)
+                        .unwrap(),
+                ),
                 time_unit: TimeUnit::Minute,
             }))
             .returning(|_| Box::pin(async { Ok(()) }));
@@ -302,8 +348,12 @@ mod tests {
         let mut mock_clock = MockClock::new();
 
         mock_clock.expect_current().times(1).returning(move || {
-            Utc.from_utc_datetime(&NaiveDate::from_ymd_opt(2021, 5, 6).unwrap()
-                .and_hms_opt(7, 2, 30).unwrap())
+            Utc.from_utc_datetime(
+                &NaiveDate::from_ymd_opt(2021, 5, 6)
+                    .unwrap()
+                    .and_hms_opt(7, 2, 30)
+                    .unwrap(),
+            )
         });
 
         assert!(!take_snapshot_if_required(
@@ -314,15 +364,23 @@ mod tests {
                 Snapshot {
                     volume: CompactString::from("zvol/abc/a"),
                     prefix: CompactString::from("abc123"),
-                    date_time: Utc.from_utc_datetime(&NaiveDate::from_ymd_opt(2021, 5, 6).unwrap()
-                        .and_hms_opt(7, 1, 1).unwrap()),
+                    date_time: Utc.from_utc_datetime(
+                        &NaiveDate::from_ymd_opt(2021, 5, 6)
+                            .unwrap()
+                            .and_hms_opt(7, 1, 1)
+                            .unwrap()
+                    ),
                     time_unit: TimeUnit::Minute,
                 },
                 Snapshot {
                     volume: CompactString::from("zvol/abc/a"),
                     prefix: CompactString::from("abc123"),
-                    date_time: Utc.from_utc_datetime(&NaiveDate::from_ymd_opt(2021, 5, 6).unwrap()
-                        .and_hms_opt(7, 2, 1).unwrap()),
+                    date_time: Utc.from_utc_datetime(
+                        &NaiveDate::from_ymd_opt(2021, 5, 6)
+                            .unwrap()
+                            .and_hms_opt(7, 2, 1)
+                            .unwrap()
+                    ),
                     time_unit: TimeUnit::Minute,
                 },
             ],
@@ -402,9 +460,12 @@ mod tests {
         Snapshot {
             volume: CompactString::from(format!("{}", id)),
             prefix: CompactString::from("autosnap"),
-            date_time: Utc.from_utc_datetime(&NaiveDate::from_ymd_opt(2021, 5, 6).unwrap()
-                .and_hms_opt(7, 1, 1).unwrap())
-                + chrono::Duration::seconds(id),
+            date_time: Utc.from_utc_datetime(
+                &NaiveDate::from_ymd_opt(2021, 5, 6)
+                    .unwrap()
+                    .and_hms_opt(7, 1, 1)
+                    .unwrap(),
+            ) + chrono::Duration::seconds(id),
             time_unit: TimeUnit::Minute,
         }
     }

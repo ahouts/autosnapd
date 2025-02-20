@@ -1,6 +1,7 @@
 use crate::snapshot::Snapshot;
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
+use blanket::blanket;
 use futures::Future;
 #[cfg(test)]
 use mockall::automock;
@@ -11,7 +12,6 @@ use std::str::FromStr;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt};
 use tokio::process::ChildStdout;
 use tokio::{io::BufReader, process::Command};
-use blanket::blanket;
 
 #[async_trait]
 #[blanket(derive(Ref))]
