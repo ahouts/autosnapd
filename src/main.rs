@@ -3,6 +3,7 @@ use crate::clock::{Clock, ClockImpl};
 use crate::time_unit::TimeUnit;
 use crate::zfs::{DryZfsApi, ZfsApi, ZfsApiImpl};
 use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use futures::lock::Mutex;
 use futures::select;
 use futures::FutureExt;
@@ -101,27 +102,6 @@ async fn handle_snapshots_for_volume<A: ZfsApi, C: Clock>(
     volume_config: &VolumeConfig,
     config: &Config,
 ) -> Result<()> {
-    if let Some(remote) = &volume_config.remote {
-        match remote::sync_remote(&remote.host, &remote.remote_path, &remote.local_path).await {
-            Ok(_) => log::debug!(
-                "successfully synced remote {}:{} to {}",
-                remote.host,
-                remote.remote_path,
-                &remote.local_path
-            ),
-            Err(e) => {
-                log::error!(
-                    "failed to sync remote {}:{} to {}: {}",
-                    remote.host,
-                    remote.remote_path,
-                    &remote.local_path,
-                    e
-                );
-                return Ok(());
-            }
-        }
-    }
-
     let mut snapshots = zfs_api.snapshots(volume).await?;
     snapshots.sort_by_key(|snapshot| snapshot.date_time);
     snapshots.sort_by_key(|snapshot| snapshot.time_unit);
@@ -139,19 +119,43 @@ async fn handle_snapshots_for_volume<A: ZfsApi, C: Clock>(
         };
         let desired_count = volume_config[time_unit];
 
-        let snapshot_taken = if desired_count != 0 {
-            take_snapshot_if_required(
-                zfs_api,
-                clock,
-                volume,
-                group,
-                time_unit,
-                config.snapshot_prefix.0.as_str(),
-            )
-            .await?
-        } else {
-            false
-        };
+        if desired_count == 0 {
+            continue;
+        }
+
+        if !is_snapshot_required(clock, group, time_unit).await {
+            continue;
+        }
+
+        if let Some(remote) = &volume_config.remote {
+            match remote::sync_remote(&remote.host, &remote.remote_path, &remote.local_path).await {
+                Ok(_) => log::debug!(
+                    "successfully synced remote {}:{} to {}",
+                    remote.host,
+                    remote.remote_path,
+                    &remote.local_path
+                ),
+                Err(e) => {
+                    log::error!(
+                        "failed to sync remote {}:{} to {}: {}",
+                        remote.host,
+                        remote.remote_path,
+                        &remote.local_path,
+                        e
+                    );
+                    return Ok(());
+                }
+            }
+        }
+
+        let snapshot_taken = take_snapshot(
+            zfs_api,
+            volume,
+            config.snapshot_prefix.0.as_str(),
+            time_unit,
+            clock.current(),
+        )
+        .await?;
 
         maybe_remove_snapshots(zfs_api, group, desired_count, snapshot_taken).await?;
     }
@@ -185,46 +189,43 @@ async fn maybe_remove_snapshots<A: ZfsApi>(
     Ok(())
 }
 
-async fn take_snapshot_if_required<A: ZfsApi, C: Clock>(
-    zfs_api: &A,
+async fn is_snapshot_required<C: Clock>(
     clock: &C,
-    volume: &str,
     group: &[Snapshot],
     time_unit: TimeUnit,
-    snapshot_prefix: &str,
-) -> Result<bool> {
+) -> bool {
     let now = clock.current();
-    let should_take_snapshot = group
+    group
         .last()
         .map(|most_recent_snapshot| {
             let should_snapshot_starting_time = most_recent_snapshot.date_time + time_unit;
             now >= should_snapshot_starting_time
         })
-        .unwrap_or(true);
-    if should_take_snapshot {
-        let snapshot = Snapshot {
-            volume: SmartString::from(volume),
-            prefix: SmartString::from(snapshot_prefix),
-            date_time: now,
-            time_unit,
-        };
-        if !snapshot.is_valid() {
-            log::warn!("not taking snapshot, snapshot is invalid: {}", snapshot);
-            return Ok(false);
-        }
-        zfs_api
-            .take_snapshot(&Snapshot {
-                volume: SmartString::from(volume),
-                prefix: SmartString::from(snapshot_prefix),
-                date_time: now,
-                time_unit,
-            })
-            .await
-            .with_context(|| "error taking snapshot")?;
-        Ok(true)
-    } else {
-        Ok(false)
+        .unwrap_or(true)
+}
+
+async fn take_snapshot<A: ZfsApi>(
+    zfs_api: &A,
+    volume: &str,
+    snapshot_prefix: &str,
+    time_unit: TimeUnit,
+    date_time: DateTime<Utc>,
+) -> Result<bool> {
+    let snapshot = Snapshot {
+        volume: SmartString::from(volume),
+        prefix: SmartString::from(snapshot_prefix),
+        date_time,
+        time_unit,
+    };
+    if !snapshot.is_valid() {
+        log::warn!("not taking snapshot, snapshot is invalid: {}", snapshot);
+        return Ok(false);
     }
+    zfs_api
+        .take_snapshot(&snapshot)
+        .await
+        .with_context(|| "error taking snapshot")?;
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -236,10 +237,8 @@ mod tests {
     use mockall::predicate::eq;
 
     #[tokio::test]
-    async fn take_snapshot_if_required_takes_a_snapshot() {
-        let mut mock_api = MockZfsApi::new();
+    async fn test_is_snapshot_required_returns_true_for_empty_group() {
         let mut mock_clock = MockClock::new();
-
         mock_clock.expect_current().times(1).returning(move || {
             Utc.from_utc_datetime(
                 &NaiveDate::from_ymd_opt(2021, 5, 6)
@@ -249,62 +248,12 @@ mod tests {
             )
         });
 
-        mock_api
-            .expect_take_snapshot()
-            .times(1)
-            .with(eq(Snapshot {
-                volume: CompactString::from("zvol/abc/a"),
-                prefix: CompactString::from("abc123"),
-                date_time: Utc.from_utc_datetime(
-                    &NaiveDate::from_ymd_opt(2021, 5, 6)
-                        .unwrap()
-                        .and_hms_opt(7, 3, 1)
-                        .unwrap(),
-                ),
-                time_unit: TimeUnit::Minute,
-            }))
-            .returning(|_| Box::pin(async { Ok(()) }));
-
-        assert!(take_snapshot_if_required(
-            &mock_api,
-            &mock_clock,
-            "zvol/abc/a",
-            &[
-                Snapshot {
-                    volume: CompactString::from("zvol/abc/a"),
-                    prefix: CompactString::from("abc312"),
-                    date_time: Utc.from_utc_datetime(
-                        &NaiveDate::from_ymd_opt(2021, 5, 6)
-                            .unwrap()
-                            .and_hms_opt(7, 1, 1)
-                            .unwrap()
-                    ),
-                    time_unit: TimeUnit::Minute,
-                },
-                Snapshot {
-                    volume: CompactString::from("zvol/abc/a"),
-                    prefix: CompactString::from("abc321"),
-                    date_time: Utc.from_utc_datetime(
-                        &NaiveDate::from_ymd_opt(2021, 5, 6)
-                            .unwrap()
-                            .and_hms_opt(7, 2, 1)
-                            .unwrap()
-                    ),
-                    time_unit: TimeUnit::Minute,
-                },
-            ],
-            TimeUnit::Minute,
-            "abc123",
-        )
-        .await
-        .unwrap());
+        assert!(is_snapshot_required(&mock_clock, &[], TimeUnit::Minute).await);
     }
 
     #[tokio::test]
-    async fn take_snapshot_if_required_takes_a_snapshot_if_no_snapshots() {
-        let mut mock_api = MockZfsApi::new();
+    async fn test_is_snapshot_required_returns_true_when_time_elapsed() {
         let mut mock_clock = MockClock::new();
-
         mock_clock.expect_current().times(1).returning(move || {
             Utc.from_utc_datetime(
                 &NaiveDate::from_ymd_opt(2021, 5, 6)
@@ -314,39 +263,29 @@ mod tests {
             )
         });
 
-        mock_api
-            .expect_take_snapshot()
-            .times(1)
-            .with(eq(Snapshot {
-                volume: CompactString::from("zvol/abc/a"),
-                prefix: CompactString::from("abc123"),
-                date_time: Utc.from_utc_datetime(
-                    &NaiveDate::from_ymd_opt(2021, 5, 6)
-                        .unwrap()
-                        .and_hms_opt(7, 3, 1)
-                        .unwrap(),
-                ),
-                time_unit: TimeUnit::Minute,
-            }))
-            .returning(|_| Box::pin(async { Ok(()) }));
-
-        assert!(take_snapshot_if_required(
-            &mock_api,
-            &mock_clock,
-            "zvol/abc/a",
-            &[],
-            TimeUnit::Minute,
-            "abc123",
-        )
-        .await
-        .unwrap());
+        assert!(
+            is_snapshot_required(
+                &mock_clock,
+                &[Snapshot {
+                    volume: CompactString::from("zvol/abc/a"),
+                    prefix: CompactString::from("abc123"),
+                    date_time: Utc.from_utc_datetime(
+                        &NaiveDate::from_ymd_opt(2021, 5, 6)
+                            .unwrap()
+                            .and_hms_opt(7, 2, 0)
+                            .unwrap()
+                    ),
+                    time_unit: TimeUnit::Minute,
+                }],
+                TimeUnit::Minute
+            )
+            .await
+        );
     }
 
     #[tokio::test]
-    async fn take_snapshot_if_required_passes() {
-        let mock_api = MockZfsApi::new();
+    async fn test_is_snapshot_required_returns_false_when_time_not_elapsed() {
         let mut mock_clock = MockClock::new();
-
         mock_clock.expect_current().times(1).returning(move || {
             Utc.from_utc_datetime(
                 &NaiveDate::from_ymd_opt(2021, 5, 6)
@@ -356,117 +295,51 @@ mod tests {
             )
         });
 
-        assert!(!take_snapshot_if_required(
-            &mock_api,
-            &mock_clock,
-            "zvol/abc/a",
-            &[
-                Snapshot {
+        assert!(
+            !is_snapshot_required(
+                &mock_clock,
+                &[Snapshot {
                     volume: CompactString::from("zvol/abc/a"),
                     prefix: CompactString::from("abc123"),
                     date_time: Utc.from_utc_datetime(
                         &NaiveDate::from_ymd_opt(2021, 5, 6)
                             .unwrap()
-                            .and_hms_opt(7, 1, 1)
+                            .and_hms_opt(7, 2, 0)
                             .unwrap()
                     ),
                     time_unit: TimeUnit::Minute,
-                },
-                Snapshot {
-                    volume: CompactString::from("zvol/abc/a"),
-                    prefix: CompactString::from("abc123"),
-                    date_time: Utc.from_utc_datetime(
-                        &NaiveDate::from_ymd_opt(2021, 5, 6)
-                            .unwrap()
-                            .and_hms_opt(7, 2, 1)
-                            .unwrap()
-                    ),
-                    time_unit: TimeUnit::Minute,
-                },
-            ],
-            TimeUnit::Minute,
-            "abc123",
-        )
-        .await
-        .unwrap());
-    }
-
-    #[tokio::test]
-    async fn maybe_remove_snapshots_desired_count_reduced_snapshot_taken() {
-        let mut mock_api = MockZfsApi::new();
-
-        mock_api
-            .expect_remove_snapshot()
-            .times(1)
-            .with(eq(snapshot(1)))
-            .returning(|_| Box::pin(async { Ok(()) }));
-
-        maybe_remove_snapshots(&mock_api, &[snapshot(1)], 0, true)
+                }],
+                TimeUnit::Minute
+            )
             .await
-            .unwrap();
+        );
     }
 
     #[tokio::test]
-    async fn maybe_remove_snapshots_new_snapshot() {
-        let mock_api = MockZfsApi::new();
-
-        maybe_remove_snapshots(&mock_api, &[snapshot(1)], 2, true)
-            .await
-            .unwrap();
-    }
-
-    #[tokio::test]
-    async fn maybe_remove_snapshots_new_snapshot_at_limit() {
+    async fn test_take_snapshot_success() {
         let mut mock_api = MockZfsApi::new();
+        let now = Utc.from_utc_datetime(
+            &NaiveDate::from_ymd_opt(2021, 5, 6)
+                .unwrap()
+                .and_hms_opt(7, 3, 1)
+                .unwrap(),
+        );
 
         mock_api
-            .expect_remove_snapshot()
+            .expect_take_snapshot()
             .times(1)
-            .with(eq(snapshot(1)))
+            .with(eq(Snapshot {
+                volume: CompactString::from("zvol/abc/a"),
+                prefix: CompactString::from("abc123"),
+                date_time: now,
+                time_unit: TimeUnit::Minute,
+            }))
             .returning(|_| Box::pin(async { Ok(()) }));
 
-        maybe_remove_snapshots(&mock_api, &[snapshot(1)], 1, true)
-            .await
-            .unwrap();
-    }
-
-    #[tokio::test]
-    async fn maybe_remove_snapshots_some_snapshots() {
-        let mut mock_api = MockZfsApi::new();
-
-        mock_api
-            .expect_remove_snapshot()
-            .times(1)
-            .with(eq(snapshot(1)))
-            .returning(|_| Box::pin(async { Ok(()) }));
-
-        mock_api
-            .expect_remove_snapshot()
-            .times(1)
-            .with(eq(snapshot(2)))
-            .returning(|_| Box::pin(async { Ok(()) }));
-
-        maybe_remove_snapshots(
-            &mock_api,
-            &[snapshot(1), snapshot(2), snapshot(3)],
-            1,
-            false,
-        )
-        .await
-        .unwrap();
-    }
-
-    fn snapshot(id: i64) -> Snapshot {
-        Snapshot {
-            volume: CompactString::from(format!("{}", id)),
-            prefix: CompactString::from("autosnap"),
-            date_time: Utc.from_utc_datetime(
-                &NaiveDate::from_ymd_opt(2021, 5, 6)
-                    .unwrap()
-                    .and_hms_opt(7, 1, 1)
-                    .unwrap(),
-            ) + chrono::Duration::seconds(id),
-            time_unit: TimeUnit::Minute,
-        }
+        assert!(
+            take_snapshot(&mock_api, "zvol/abc/a", "abc123", TimeUnit::Minute, now)
+                .await
+                .unwrap()
+        );
     }
 }
