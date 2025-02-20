@@ -18,6 +18,7 @@ slice-group-by = "0.3"
 futures = "0.3"
 strum = "0.27"
 strum_macros = "0.27"
+blanket = "0.4"
 
 [dependencies.smartstring]
 version = "1"

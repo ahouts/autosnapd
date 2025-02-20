@@ -11,8 +11,10 @@ use std::str::FromStr;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt};
 use tokio::process::ChildStdout;
 use tokio::{io::BufReader, process::Command};
+use blanket::blanket;
 
 #[async_trait]
+#[blanket(derive(Ref))]
 #[cfg_attr(test, automock)]
 pub trait ZfsApi {
     async fn snapshots(&self, volume: &str) -> Result<Vec<Snapshot>>;
@@ -141,7 +143,7 @@ async fn exec<
         ));
     }
 
-    Ok(result.with_context(|| format!("error handling output from zfs {:?}", args))?)
+    result.with_context(|| format!("error handling output from zfs {:?}", args))
 }
 
 pub struct DryZfsApi<A: ZfsApi>(pub A);
