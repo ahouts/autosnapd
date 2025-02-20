@@ -6,13 +6,14 @@ use tokio::process::Command;
 pub async fn sync_remote(host: &str, remote_path: &str, local_path: &str) -> Result<()> {
     log::debug!("syncing remote {}:{} to {}", host, remote_path, local_path);
 
+    let source_path = if host.is_empty() {
+        format!("{}/", remote_path)
+    } else {
+        format!("{}:{}/", host, remote_path)
+    };
+
     let mut cmd = Command::new("rsync")
-        .args([
-            "-az",
-            "--delete",
-            &format!("{}:{}/", host, remote_path),
-            &format!("{}/", local_path),
-        ])
+        .args(["-az", "--delete", &source_path, &format!("{}/", local_path)])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -43,6 +44,7 @@ pub async fn sync_remote(host: &str, remote_path: &str, local_path: &str) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use tempfile::TempDir;
 
     #[tokio::test]
@@ -52,21 +54,20 @@ mod tests {
         let remote_dir = TempDir::new().unwrap();
 
         // Create a test file in remote dir
-        std::fs::write(remote_dir.path().join("test.txt"), "test content").unwrap();
+        fs::write(remote_dir.path().join("test.txt"), "test content").unwrap();
 
         let result = sync_remote(
-            "localhost",
+            "", // Empty host for local sync
             remote_dir.path().to_str().unwrap(),
             local_dir.path().to_str().unwrap(),
         )
         .await;
 
-        println!("result: {:?}", result);
         assert!(result.is_ok());
         assert!(local_dir.path().join("test.txt").exists());
 
         // Verify content
-        let content = std::fs::read_to_string(local_dir.path().join("test.txt")).unwrap();
+        let content = fs::read_to_string(local_dir.path().join("test.txt")).unwrap();
         assert_eq!(content, "test content");
     }
 
