@@ -1,2 +1,6 @@
 /target
 /.idea
+/PKGBUILD
+/autosnapd-*.pkg.tar.*
+/autosnapd.service
+/pkg/
