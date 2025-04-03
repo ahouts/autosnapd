@@ -33,7 +33,7 @@ impl RemoteApi for RemoteCommand {
         };
 
         let mut cmd = Command::new("rsync")
-            .args(["-az", "--delete", &source_path, &format!("{}/", local_path)])
+            .args(["-az", "--delete", "--chown=root:root", &source_path, &format!("{}/", local_path)])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
