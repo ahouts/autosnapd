@@ -57,19 +57,14 @@ pub struct RemoteConfig {
     pub local_path: CompactString,
 }
 
-#[derive(Debug, Eq, PartialEq, Deserialize, Clone)]
+#[derive(Debug, Eq, PartialEq, Clone)]
 pub struct ReplicationConfig {
     pub host: CompactString,
     pub dataset: CompactString,
-    #[serde(default)]
     pub minutely: u16,
-    #[serde(default)]
     pub hourly: u16,
-    #[serde(default)]
     pub daily: u16,
-    #[serde(default)]
     pub monthly: u16,
-    #[serde(default)]
     pub yearly: u16,
 }
 
@@ -112,7 +107,22 @@ struct RawVolumeConfig {
 #[serde(deny_unknown_fields)]
 struct RawBaseVolumeConfig {
     remote: Option<RemoteConfig>,
-    replication: Option<ReplicationConfig>,
+    replication: Option<RawReplicationConfig>,
+    host: Option<CompactString>,
+    dataset: Option<CompactString>,
+    minutely: Option<u16>,
+    hourly: Option<u16>,
+    daily: Option<u16>,
+    monthly: Option<u16>,
+    yearly: Option<u16>,
+}
+
+#[derive(Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+struct RawReplicationConfig {
+    template: Option<CompactString>,
+    host: Option<CompactString>,
+    dataset: Option<CompactString>,
     minutely: Option<u16>,
     hourly: Option<u16>,
     daily: Option<u16>,
@@ -155,27 +165,87 @@ pub fn load_config(data: &str) -> Result<Config> {
     let raw_cfg: RawConfig =
         toml::from_str(data).with_context(|| "error parsing configuration file")?;
 
-    fn apply_defaults(cfg: &RawBaseVolumeConfig, defaults: &VolumeConfig) -> VolumeConfig {
-        VolumeConfig {
+    fn apply_defaults(
+        cfg: &RawBaseVolumeConfig,
+        defaults: &VolumeConfig,
+        templates: &HashMap<CompactString, RawBaseVolumeConfig>,
+    ) -> Result<VolumeConfig> {
+        Ok(VolumeConfig {
             minutely: cfg.minutely.unwrap_or(defaults.minutely),
             hourly: cfg.hourly.unwrap_or(defaults.hourly),
             daily: cfg.daily.unwrap_or(defaults.daily),
             monthly: cfg.monthly.unwrap_or(defaults.monthly),
             yearly: cfg.yearly.unwrap_or(defaults.yearly),
             remote: cfg.remote.clone().or_else(|| defaults.remote.clone()),
-            replication: cfg
-                .replication
-                .clone()
-                .or_else(|| defaults.replication.clone()),
-        }
+            replication: match &cfg.replication {
+                Some(replication) => Some(resolve_replication(replication, templates)?),
+                None => defaults.replication.clone(),
+            },
+        })
     }
 
-    let templates: HashMap<CompactString, VolumeConfig> = raw_cfg
-        .templates
-        .0
-        .into_iter()
-        .map(|(key, config)| (key, apply_defaults(&config, &VolumeConfig::default())))
-        .collect();
+    fn resolve_replication(
+        cfg: &RawReplicationConfig,
+        templates: &HashMap<CompactString, RawBaseVolumeConfig>,
+    ) -> Result<ReplicationConfig> {
+        let template = match &cfg.template {
+            Some(template_name) => {
+                let template = templates
+                    .get(template_name)
+                    .with_context(|| format!("unknown replication template: {}", template_name))?;
+                Some(template)
+            }
+            None => None,
+        };
+
+        let host = cfg
+            .host
+            .clone()
+            .or_else(|| template.and_then(|template| template.host.clone()))
+            .with_context(|| "replication config missing host")?;
+        let dataset = cfg
+            .dataset
+            .clone()
+            .or_else(|| template.and_then(|template| template.dataset.clone()))
+            .with_context(|| "replication config missing dataset")?;
+
+        Ok(ReplicationConfig {
+            host,
+            dataset,
+            minutely: cfg
+                .minutely
+                .or_else(|| template.and_then(|template| template.minutely))
+                .unwrap_or(0),
+            hourly: cfg
+                .hourly
+                .or_else(|| template.and_then(|template| template.hourly))
+                .unwrap_or(0),
+            daily: cfg
+                .daily
+                .or_else(|| template.and_then(|template| template.daily))
+                .unwrap_or(0),
+            monthly: cfg
+                .monthly
+                .or_else(|| template.and_then(|template| template.monthly))
+                .unwrap_or(0),
+            yearly: cfg
+                .yearly
+                .or_else(|| template.and_then(|template| template.yearly))
+                .unwrap_or(0),
+        })
+    }
+
+    let raw_templates = raw_cfg.templates.0;
+
+    let templates: HashMap<CompactString, VolumeConfig> = raw_templates
+        .iter()
+        .map(|(key, config)| {
+            Ok((
+                key.clone(),
+                apply_defaults(&config, &VolumeConfig::default(), &raw_templates)?,
+            ))
+        })
+        .collect::<Result<HashMap<CompactString, VolumeConfig>>>()?;
 
     Ok(Config {
         snapshot_prefix: raw_cfg.snapshot_prefix,
@@ -185,12 +255,15 @@ pub fn load_config(data: &str) -> Result<Config> {
             .map(|(key, config)| {
                 if let Some(template_name) = &config.template {
                     if let Some(template) = templates.get(template_name) {
-                        Ok((key, apply_defaults(&config.base, template)))
+                        Ok((key, apply_defaults(&config.base, template, &raw_templates)?))
                     } else {
                         Err(anyhow!("unknown template: {}", template_name))
                     }
                 } else {
-                    Ok((key, apply_defaults(&config.base, &VolumeConfig::default())))
+                    Ok((
+                        key,
+                        apply_defaults(&config.base, &VolumeConfig::default(), &raw_templates)?,
+                    ))
                 }
             })
             .collect::<Result<HashMap<CompactString, VolumeConfig>>>()?,
@@ -377,5 +450,135 @@ monthly = 3
         );
         assert_eq!(logs_cfg.replication.as_ref().unwrap().hourly, 0);
         assert_eq!(logs_cfg.replication.as_ref().unwrap().monthly, 12);
+    }
+
+    #[test]
+    fn load_config_with_replication_template() {
+        const TEST_CONFIG: &str = r#"
+[templates.backup]
+host = "backup.example.com"
+hourly = 72
+daily = 30
+
+["tank/data"]
+replication = { template = "backup", dataset = "backup/tank/data" }
+
+["tank/logs"]
+replication = { template = "backup", dataset = "backup/tank/logs", hourly = 12, monthly = 3 }
+        "#;
+
+        let config = load_config(TEST_CONFIG).unwrap();
+
+        let data_replication = config
+            .volume_config
+            .get("tank/data")
+            .unwrap()
+            .replication
+            .as_ref()
+            .unwrap();
+        assert_eq!(data_replication.host, "backup.example.com");
+        assert_eq!(data_replication.dataset, "backup/tank/data");
+        assert_eq!(data_replication.hourly, 72);
+        assert_eq!(data_replication.daily, 30);
+        assert_eq!(data_replication.monthly, 0);
+
+        let logs_replication = config
+            .volume_config
+            .get("tank/logs")
+            .unwrap()
+            .replication
+            .as_ref()
+            .unwrap();
+        assert_eq!(logs_replication.host, "backup.example.com");
+        assert_eq!(logs_replication.dataset, "backup/tank/logs");
+        assert_eq!(logs_replication.hourly, 12);
+        assert_eq!(logs_replication.daily, 30);
+        assert_eq!(logs_replication.monthly, 3);
+    }
+
+    #[test]
+    fn load_config_with_matching_volume_and_replication_template() {
+        const TEST_CONFIG: &str = r#"
+[templates.backup]
+host = "backup.example.com"
+hourly = 24
+daily = 7
+
+["tank/data"]
+template = "backup"
+replication = { template = "backup", dataset = "backup/tank/data" }
+        "#;
+
+        let config = load_config(TEST_CONFIG).unwrap();
+        let volume = config.volume_config.get("tank/data").unwrap();
+
+        assert_eq!(volume.hourly, 24);
+        assert_eq!(volume.daily, 7);
+        assert_eq!(volume.replication.as_ref().unwrap().hourly, 24);
+        assert_eq!(volume.replication.as_ref().unwrap().daily, 7);
+    }
+
+    #[test]
+    fn direct_template_replication_fields_do_not_create_replication_for_volume_template() {
+        const TEST_CONFIG: &str = r#"
+[templates.backup]
+host = "backup.example.com"
+hourly = 24
+
+["tank/data"]
+template = "backup"
+        "#;
+
+        let config = load_config(TEST_CONFIG).unwrap();
+        let volume = config.volume_config.get("tank/data").unwrap();
+
+        assert_eq!(volume.hourly, 24);
+        assert_eq!(volume.replication, None);
+    }
+
+    #[test]
+    fn unknown_replication_template_fails() {
+        const TEST_CONFIG: &str = r#"
+["tank/data"]
+replication = { template = "missing", dataset = "backup/tank/data" }
+        "#;
+
+        assert_eq!(
+            "unknown replication template: missing",
+            load_config(TEST_CONFIG).unwrap_err().to_string()
+        );
+    }
+
+    #[test]
+    fn replication_template_without_host_fails() {
+        const TEST_CONFIG: &str = r#"
+[templates.backup]
+hourly = 24
+
+["tank/data"]
+replication = { template = "backup", dataset = "backup/tank/data" }
+        "#;
+
+        assert_eq!(
+            "replication config missing host",
+            load_config(TEST_CONFIG).unwrap_err().to_string()
+        );
+    }
+
+    #[test]
+    fn replication_template_without_dataset_fails() {
+        const TEST_CONFIG: &str = r#"
+[templates.backup]
+host = "backup.example.com"
+hourly = 24
+
+["tank/data"]
+replication = { template = "backup" }
+        "#;
+
+        assert_eq!(
+            "replication config missing dataset",
+            load_config(TEST_CONFIG).unwrap_err().to_string()
+        );
     }
 }
