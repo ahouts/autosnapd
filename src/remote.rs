@@ -5,7 +5,7 @@ use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::process::Stdio;
+use std::process::{ExitStatus, Stdio};
 use std::str::FromStr;
 use strum::IntoEnumIterator;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -108,6 +108,26 @@ impl ReplicationApi for RemoteCommand {
             remote_dataset
         );
 
+        if let Some(token) = self
+            .remote_receive_resume_token(remote_host, remote_dataset)
+            .await
+            .with_context(|| {
+                format!(
+                    "error getting receive resume token for {}:{}",
+                    remote_host, remote_dataset
+                )
+            })?
+        {
+            self.send_resume_token(remote_host, remote_dataset, &token)
+                .await
+                .with_context(|| {
+                    format!(
+                        "error resuming replication to {}:{}",
+                        remote_host, remote_dataset
+                    )
+                })?;
+        }
+
         let remote_snapshots = self
             .remote_snapshots(remote_host, remote_dataset)
             .await
@@ -165,7 +185,7 @@ impl RemoteCommand {
         remote_host: &str,
         remote_dataset: &str,
     ) -> Result<Vec<Snapshot>> {
-        let mut cmd = Command::new("ssh")
+        let cmd = Command::new("ssh")
             .arg(remote_host)
             .args([
                 "zfs",
@@ -183,23 +203,9 @@ impl RemoteCommand {
             .spawn()
             .with_context(|| format!("failed to execute ssh {}", remote_host))?;
 
-        let mut stdout = String::new();
-        cmd.stdout
-            .as_mut()
-            .unwrap()
-            .read_to_string(&mut stdout)
+        let (status, stdout, stderr) = wait_with_piped_output(cmd)
             .await
-            .with_context(|| "failed to read ssh stdout")?;
-
-        let mut stderr = String::new();
-        cmd.stderr
-            .as_mut()
-            .unwrap()
-            .read_to_string(&mut stderr)
-            .await
-            .with_context(|| "failed to read ssh stderr")?;
-
-        let status = cmd.wait().await?;
+            .with_context(|| "failed to read remote zfs list output")?;
         if !status.success() {
             return Err(anyhow!(
                 "remote zfs list failed with exit code {} and error:\n{}",
@@ -222,6 +228,42 @@ impl RemoteCommand {
                 }
             })
             .collect())
+    }
+
+    async fn remote_receive_resume_token(
+        &self,
+        remote_host: &str,
+        remote_dataset: &str,
+    ) -> Result<Option<String>> {
+        let cmd = Command::new("ssh")
+            .arg(remote_host)
+            .args([
+                "zfs",
+                "get",
+                "-H",
+                "-o",
+                "value",
+                "receive_resume_token",
+                remote_dataset,
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .with_context(|| format!("failed to execute ssh {}", remote_host))?;
+
+        let (status, stdout, stderr) = wait_with_piped_output(cmd)
+            .await
+            .with_context(|| "failed to read remote zfs receive_resume_token output")?;
+        if !status.success() {
+            return Err(anyhow!(
+                "remote zfs get receive_resume_token failed with exit code {} and error:\n{}",
+                status.code().unwrap_or(-1),
+                stderr.trim()
+            ));
+        }
+
+        Ok(parse_receive_resume_token(&stdout))
     }
 
     async fn send_snapshot(
@@ -247,24 +289,49 @@ impl RemoteCommand {
             ),
         }
 
-        let snapshot_name = snapshot.to_string();
-        let parent_name = parent.map(|snapshot| snapshot.to_string());
+        self.send_stream(
+            remote_host,
+            remote_dataset,
+            SendRequest::Snapshot { parent, snapshot },
+        )
+        .await
+    }
+
+    async fn send_resume_token(
+        &self,
+        remote_host: &str,
+        remote_dataset: &str,
+        token: &str,
+    ) -> Result<()> {
+        log::info!(
+            "resuming interrupted zfs receive to {}:{}",
+            remote_host,
+            remote_dataset
+        );
+
+        self.send_stream(remote_host, remote_dataset, SendRequest::ResumeToken(token))
+            .await
+    }
+
+    async fn send_stream(
+        &self,
+        remote_host: &str,
+        remote_dataset: &str,
+        request: SendRequest<'_>,
+    ) -> Result<()> {
+        let send_args = zfs_send_args(request);
         let mut send_cmd = Command::new(&self.zfs_path);
-        send_cmd.arg("send");
-        if let Some(parent_name) = parent_name.as_ref() {
-            send_cmd.args(["-i", parent_name]);
-        }
         let mut send = send_cmd
-            .arg(&snapshot_name)
+            .args(&send_args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .with_context(|| format!("failed to execute zfs send for {}", snapshot))?;
+            .with_context(|| format!("failed to execute zfs {:?}", send_args))?;
 
         let mut receive = Command::new("ssh")
             .arg(remote_host)
-            .args(["zfs", "receive", "-u", remote_dataset])
+            .args(zfs_receive_args(remote_dataset))
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -353,6 +420,76 @@ impl RemoteCommand {
         }
 
         Ok(())
+    }
+}
+
+async fn wait_with_piped_output(
+    mut cmd: tokio::process::Child,
+) -> Result<(ExitStatus, String, String)> {
+    let mut stdout = cmd
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow!("child stdout was not piped"))?;
+    let mut stderr = cmd
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow!("child stderr was not piped"))?;
+
+    let mut stdout_buf = String::new();
+    let mut stderr_buf = String::new();
+    let (stdout_result, stderr_result) = tokio::join!(
+        stdout.read_to_string(&mut stdout_buf),
+        stderr.read_to_string(&mut stderr_buf)
+    );
+    stdout_result.with_context(|| "failed to read child stdout")?;
+    stderr_result.with_context(|| "failed to read child stderr")?;
+
+    let status = cmd.wait().await?;
+
+    Ok((status, stdout_buf, stderr_buf))
+}
+
+enum SendRequest<'a> {
+    Snapshot {
+        parent: Option<&'a Snapshot>,
+        snapshot: &'a Snapshot,
+    },
+    ResumeToken(&'a str),
+}
+
+fn zfs_send_args(request: SendRequest<'_>) -> Vec<String> {
+    match request {
+        SendRequest::Snapshot { parent, snapshot } => {
+            let mut args = vec![String::from("send")];
+            if let Some(parent) = parent {
+                args.push(String::from("-i"));
+                args.push(parent.to_string());
+            }
+            args.push(snapshot.to_string());
+            args
+        }
+        SendRequest::ResumeToken(token) => {
+            vec![String::from("send"), String::from("-t"), token.to_string()]
+        }
+    }
+}
+
+fn zfs_receive_args(remote_dataset: &str) -> Vec<String> {
+    vec![
+        String::from("zfs"),
+        String::from("receive"),
+        String::from("-s"),
+        String::from("-u"),
+        remote_dataset.to_string(),
+    ]
+}
+
+fn parse_receive_resume_token(output: &str) -> Option<String> {
+    let token = output.trim();
+    if token.is_empty() || token == "-" {
+        None
+    } else {
+        Some(token.to_string())
     }
 }
 
@@ -541,6 +678,82 @@ mod tests {
                 &[test_snapshot("tank/data", 1), second, third],
                 &[remote_first]
             )
+        );
+    }
+
+    #[test]
+    fn zfs_send_args_builds_full_send() {
+        let snapshot = test_snapshot("tank/data", 1);
+
+        assert_eq!(
+            vec![
+                "send".to_string(),
+                "tank/data@autosnap_2021-06-14T03:01:01Z_hourly".to_string()
+            ],
+            zfs_send_args(SendRequest::Snapshot {
+                parent: None,
+                snapshot: &snapshot
+            })
+        );
+    }
+
+    #[test]
+    fn zfs_send_args_builds_incremental_send() {
+        let parent = test_snapshot("tank/data", 1);
+        let snapshot = test_snapshot("tank/data", 2);
+
+        assert_eq!(
+            vec![
+                "send".to_string(),
+                "-i".to_string(),
+                "tank/data@autosnap_2021-06-14T03:01:01Z_hourly".to_string(),
+                "tank/data@autosnap_2021-06-14T03:02:01Z_hourly".to_string()
+            ],
+            zfs_send_args(SendRequest::Snapshot {
+                parent: Some(&parent),
+                snapshot: &snapshot
+            })
+        );
+    }
+
+    #[test]
+    fn zfs_send_args_builds_resume_send() {
+        assert_eq!(
+            vec![
+                "send".to_string(),
+                "-t".to_string(),
+                "resume-token".to_string()
+            ],
+            zfs_send_args(SendRequest::ResumeToken("resume-token"))
+        );
+    }
+
+    #[test]
+    fn zfs_receive_args_uses_resumable_unmounted_receive() {
+        assert_eq!(
+            vec![
+                "zfs".to_string(),
+                "receive".to_string(),
+                "-s".to_string(),
+                "-u".to_string(),
+                "backup/tank/data".to_string()
+            ],
+            zfs_receive_args("backup/tank/data")
+        );
+    }
+
+    #[test]
+    fn parse_receive_resume_token_handles_missing_tokens() {
+        assert_eq!(None, parse_receive_resume_token("-\n"));
+        assert_eq!(None, parse_receive_resume_token("\n"));
+        assert_eq!(None, parse_receive_resume_token("   \n"));
+    }
+
+    #[test]
+    fn parse_receive_resume_token_returns_token() {
+        assert_eq!(
+            Some("1-token-value".to_string()),
+            parse_receive_resume_token(" 1-token-value\n")
         );
     }
 
