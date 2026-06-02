@@ -1,8 +1,15 @@
-use anyhow::{Context, Result};
-use std::process::Stdio;
-use tokio::io::AsyncReadExt;
-use tokio::process::Command;
+use crate::cfg::ReplicationConfig;
+use crate::snapshot::Snapshot;
+use crate::time_unit::TimeUnit;
+use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
+use std::collections::HashSet;
+use std::path::PathBuf;
+use std::process::Stdio;
+use std::str::FromStr;
+use strum::IntoEnumIterator;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::process::Command;
 
 #[cfg(test)]
 use mockall::automock;
@@ -13,11 +20,27 @@ pub trait RemoteApi {
     async fn sync_remote(&self, host: &str, remote_path: &str, local_path: &str) -> Result<()>;
 }
 
-pub struct RemoteCommand;
+#[async_trait]
+#[cfg_attr(test, automock)]
+pub trait ReplicationApi {
+    async fn replicate_snapshots(
+        &self,
+        local_volume: &str,
+        remote_host: &str,
+        remote_dataset: &str,
+        snapshots: &[Snapshot],
+    ) -> Result<()>;
+
+    async fn prune_snapshots(&self, replication: &ReplicationConfig) -> Result<()>;
+}
+
+pub struct RemoteCommand {
+    zfs_path: PathBuf,
+}
 
 impl RemoteCommand {
-    pub fn new() -> Self {
-        Self
+    pub fn new(zfs_path: PathBuf) -> Self {
+        Self { zfs_path }
     }
 }
 
@@ -33,7 +56,13 @@ impl RemoteApi for RemoteCommand {
         };
 
         let mut cmd = Command::new("rsync")
-            .args(["-az", "--delete", "--chown=root:root", &source_path, &format!("{}/", local_path)])
+            .args([
+                "-az",
+                "--delete",
+                "--chown=root:root",
+                &source_path,
+                &format!("{}/", local_path),
+            ])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -62,10 +91,367 @@ impl RemoteApi for RemoteCommand {
     }
 }
 
+#[async_trait]
+impl ReplicationApi for RemoteCommand {
+    async fn replicate_snapshots(
+        &self,
+        local_volume: &str,
+        remote_host: &str,
+        remote_dataset: &str,
+        snapshots: &[Snapshot],
+    ) -> Result<()> {
+        log::debug!(
+            "replicating {} snapshots from {} to {}:{}",
+            snapshots.len(),
+            local_volume,
+            remote_host,
+            remote_dataset
+        );
+
+        let remote_snapshots = self
+            .remote_snapshots(remote_host, remote_dataset)
+            .await
+            .with_context(|| {
+                format!(
+                    "error listing remote snapshots for {}:{}",
+                    remote_host, remote_dataset
+                )
+            })?;
+
+        for (parent, snapshot) in replication_plan(snapshots, &remote_snapshots) {
+            self.send_snapshot(remote_host, remote_dataset, parent.as_ref(), &snapshot)
+                .await
+                .with_context(|| {
+                    format!(
+                        "error sending snapshot {} to {}:{}",
+                        snapshot, remote_host, remote_dataset
+                    )
+                })?;
+        }
+
+        Ok(())
+    }
+
+    async fn prune_snapshots(&self, replication: &ReplicationConfig) -> Result<()> {
+        let mut snapshots = self
+            .remote_snapshots(&replication.host, &replication.dataset)
+            .await
+            .with_context(|| {
+                format!(
+                    "error listing remote snapshots for {}:{}",
+                    replication.host, replication.dataset
+                )
+            })?;
+        sort_snapshots(&mut snapshots);
+
+        for snapshot in remote_prune_plan(&snapshots, replication) {
+            self.remove_snapshot(&replication.host, &snapshot)
+                .await
+                .with_context(|| {
+                    format!(
+                        "error removing remote snapshot {} from {}:{}",
+                        snapshot, replication.host, replication.dataset
+                    )
+                })?;
+        }
+
+        Ok(())
+    }
+}
+
+impl RemoteCommand {
+    async fn remote_snapshots(
+        &self,
+        remote_host: &str,
+        remote_dataset: &str,
+    ) -> Result<Vec<Snapshot>> {
+        let mut cmd = Command::new("ssh")
+            .arg(remote_host)
+            .args([
+                "zfs",
+                "list",
+                "-H",
+                "-o",
+                "name",
+                "-t",
+                "snapshot",
+                remote_dataset,
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .with_context(|| format!("failed to execute ssh {}", remote_host))?;
+
+        let mut stdout = String::new();
+        cmd.stdout
+            .as_mut()
+            .unwrap()
+            .read_to_string(&mut stdout)
+            .await
+            .with_context(|| "failed to read ssh stdout")?;
+
+        let mut stderr = String::new();
+        cmd.stderr
+            .as_mut()
+            .unwrap()
+            .read_to_string(&mut stderr)
+            .await
+            .with_context(|| "failed to read ssh stderr")?;
+
+        let status = cmd.wait().await?;
+        if !status.success() {
+            return Err(anyhow!(
+                "remote zfs list failed with exit code {} and error:\n{}",
+                status.code().unwrap_or(-1),
+                stderr.trim()
+            ));
+        }
+
+        Ok(stdout
+            .lines()
+            .filter_map(|line| match Snapshot::from_str(line.trim()) {
+                Ok(snapshot) if snapshot.is_valid() => Some(snapshot),
+                Ok(snapshot) => {
+                    log::warn!("remote snapshot is not valid, ignoring: {}", snapshot);
+                    None
+                }
+                Err(e) => {
+                    log::trace!("error parsing remote snapshot: {}", e);
+                    None
+                }
+            })
+            .collect())
+    }
+
+    async fn send_snapshot(
+        &self,
+        remote_host: &str,
+        remote_dataset: &str,
+        parent: Option<&Snapshot>,
+        snapshot: &Snapshot,
+    ) -> Result<()> {
+        match parent {
+            Some(parent) => log::info!(
+                "incrementally sending snapshot {} from {} to {}:{}",
+                snapshot,
+                parent,
+                remote_host,
+                remote_dataset
+            ),
+            None => log::info!(
+                "fully sending snapshot {} to {}:{}",
+                snapshot,
+                remote_host,
+                remote_dataset
+            ),
+        }
+
+        let snapshot_name = snapshot.to_string();
+        let parent_name = parent.map(|snapshot| snapshot.to_string());
+        let mut send_cmd = Command::new(&self.zfs_path);
+        send_cmd.arg("send");
+        if let Some(parent_name) = parent_name.as_ref() {
+            send_cmd.args(["-i", parent_name]);
+        }
+        let mut send = send_cmd
+            .arg(&snapshot_name)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .with_context(|| format!("failed to execute zfs send for {}", snapshot))?;
+
+        let mut receive = Command::new("ssh")
+            .arg(remote_host)
+            .args(["zfs", "receive", "-u", remote_dataset])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .with_context(|| format!("failed to execute remote zfs receive on {}", remote_host))?;
+
+        let mut send_stdout = send.stdout.take().unwrap();
+        let mut receive_stdin = receive.stdin.take().unwrap();
+        let mut send_stderr = String::new();
+        let mut receive_stderr = String::new();
+        let (pipe_result, send_stderr_result, receive_stderr_result) = tokio::join!(
+            async {
+                let result = tokio::io::copy(&mut send_stdout, &mut receive_stdin).await;
+                receive_stdin.shutdown().await?;
+                result
+            },
+            async {
+                send.stderr
+                    .as_mut()
+                    .unwrap()
+                    .read_to_string(&mut send_stderr)
+                    .await
+            },
+            async {
+                receive
+                    .stderr
+                    .as_mut()
+                    .unwrap()
+                    .read_to_string(&mut receive_stderr)
+                    .await
+            }
+        );
+        pipe_result.with_context(|| "error piping zfs send to remote zfs receive")?;
+        send_stderr_result.with_context(|| "error reading zfs send stderr")?;
+        receive_stderr_result.with_context(|| "error reading remote zfs receive stderr")?;
+
+        let send_status = send.wait().await?;
+        let receive_status = receive.wait().await?;
+
+        if !send_status.success() {
+            return Err(anyhow!(
+                "zfs send failed with exit code {} and error:\n{}",
+                send_status.code().unwrap_or(-1),
+                send_stderr.trim()
+            ));
+        }
+
+        if !receive_status.success() {
+            return Err(anyhow!(
+                "remote zfs receive failed with exit code {} and error:\n{}",
+                receive_status.code().unwrap_or(-1),
+                receive_stderr.trim()
+            ));
+        }
+
+        Ok(())
+    }
+
+    async fn remove_snapshot(&self, remote_host: &str, snapshot: &Snapshot) -> Result<()> {
+        log::info!("removing remote snapshot {}:{}", remote_host, snapshot);
+
+        let mut cmd = Command::new("ssh")
+            .arg(remote_host)
+            .args(["zfs", "destroy", &snapshot.to_string()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .with_context(|| format!("failed to execute remote zfs destroy on {}", remote_host))?;
+
+        let mut stderr = String::new();
+        cmd.stderr
+            .as_mut()
+            .unwrap()
+            .read_to_string(&mut stderr)
+            .await
+            .with_context(|| "failed to read remote zfs destroy stderr")?;
+
+        let status = cmd.wait().await?;
+        if !status.success() {
+            return Err(anyhow!(
+                "remote zfs destroy failed with exit code {} and error:\n{}",
+                status.code().unwrap_or(-1),
+                stderr.trim()
+            ));
+        }
+
+        Ok(())
+    }
+}
+
+fn snapshot_key(snapshot: &Snapshot) -> String {
+    format!(
+        "{}_{}_{}",
+        snapshot.prefix, snapshot.date_time, snapshot.time_unit
+    )
+}
+
+fn replication_plan(local: &[Snapshot], remote: &[Snapshot]) -> Vec<(Option<Snapshot>, Snapshot)> {
+    let remote_snapshot_keys = remote.iter().map(snapshot_key).collect::<HashSet<_>>();
+    let latest_common_index = local
+        .iter()
+        .rposition(|snapshot| remote_snapshot_keys.contains(&snapshot_key(snapshot)));
+
+    let mut parent = latest_common_index.map(|index| local[index].clone());
+    let start_index = latest_common_index.map(|index| index + 1).unwrap_or(0);
+    let mut plan = Vec::new();
+
+    for snapshot in local[start_index..]
+        .iter()
+        .filter(|snapshot| !remote_snapshot_keys.contains(&snapshot_key(snapshot)))
+    {
+        plan.push((parent.clone(), snapshot.clone()));
+        parent = Some(snapshot.clone());
+    }
+
+    plan
+}
+
+fn remote_prune_plan(snapshots: &[Snapshot], retention: &ReplicationConfig) -> Vec<Snapshot> {
+    let mut to_remove = Vec::new();
+
+    for time_unit in TimeUnit::iter() {
+        let desired_count = retention[time_unit] as usize;
+        if desired_count == 0 {
+            continue;
+        }
+
+        let group = snapshots_for_time_unit(snapshots, time_unit);
+        if group.len() > desired_count {
+            to_remove.extend_from_slice(&group[..group.len() - desired_count]);
+        }
+    }
+
+    to_remove
+}
+
+fn sort_snapshots(snapshots: &mut [Snapshot]) {
+    snapshots.sort_by_key(|snapshot| snapshot.date_time);
+    snapshots.sort_by_key(|snapshot| snapshot.time_unit);
+}
+
+fn snapshots_for_time_unit(snapshots: &[Snapshot], time_unit: TimeUnit) -> Vec<Snapshot> {
+    snapshots
+        .iter()
+        .filter(|snapshot| snapshot.time_unit == time_unit)
+        .cloned()
+        .collect()
+}
+
+pub struct DryReplicationApi<A: ReplicationApi>(pub A);
+
+#[async_trait]
+impl<A: ReplicationApi + Send + Sync> ReplicationApi for DryReplicationApi<A> {
+    async fn replicate_snapshots(
+        &self,
+        local_volume: &str,
+        remote_host: &str,
+        remote_dataset: &str,
+        snapshots: &[Snapshot],
+    ) -> Result<()> {
+        log::info!(
+            "not replicating {} snapshots from {} to {}:{}, dry run",
+            snapshots.len(),
+            local_volume,
+            remote_host,
+            remote_dataset
+        );
+        Ok(())
+    }
+
+    async fn prune_snapshots(&self, replication: &ReplicationConfig) -> Result<()> {
+        log::info!(
+            "not pruning remote snapshots for {}:{}, dry run",
+            replication.host,
+            replication.dataset
+        );
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{NaiveDate, TimeZone, Utc};
     use std::fs;
+    use std::path::PathBuf;
     use tempfile::TempDir;
 
     #[tokio::test]
@@ -77,13 +463,14 @@ mod tests {
         // Create a test file in remote dir
         fs::write(remote_dir.path().join("test.txt"), "test content").unwrap();
 
-        let remote = RemoteCommand::new();
-        let result = remote.sync_remote(
-            "", // Empty host for local sync
-            remote_dir.path().to_str().unwrap(),
-            local_dir.path().to_str().unwrap(),
-        )
-        .await;
+        let remote = RemoteCommand::new(PathBuf::from("zfs"));
+        let result = remote
+            .sync_remote(
+                "", // Empty host for local sync
+                remote_dir.path().to_str().unwrap(),
+                local_dir.path().to_str().unwrap(),
+            )
+            .await;
 
         assert!(result.is_ok());
         assert!(local_dir.path().join("test.txt").exists());
@@ -95,10 +482,141 @@ mod tests {
 
     #[tokio::test]
     async fn test_sync_remote_failure() {
-        let remote = RemoteCommand::new();
-        let result = remote.sync_remote("nonexistent-host", "/nonexistent/path", "/tmp/nonexistent").await;
+        let remote = RemoteCommand::new(PathBuf::from("zfs"));
+        let result = remote
+            .sync_remote("nonexistent-host", "/nonexistent/path", "/tmp/nonexistent")
+            .await;
 
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("rsync failed"));
+    }
+
+    #[test]
+    fn snapshot_key_ignores_volume() {
+        let local = Snapshot::from_str("tank/data@autosnap_2021-06-14T03:21:01Z_hourly").unwrap();
+        let remote =
+            Snapshot::from_str("backup/tank/data@autosnap_2021-06-14T03:21:01Z_hourly").unwrap();
+
+        assert_eq!(snapshot_key(&local), snapshot_key(&remote));
+    }
+
+    #[test]
+    fn replication_plan_sends_full_then_incremental_when_no_common_parent_exists() {
+        let first = test_snapshot("tank/data", 1);
+        let second = test_snapshot("tank/data", 2);
+
+        assert_eq!(
+            vec![(None, first.clone()), (Some(first), second.clone())],
+            replication_plan(&[test_snapshot("tank/data", 1), second], &[])
+        );
+    }
+
+    #[test]
+    fn replication_plan_sends_only_after_latest_common_parent() {
+        let first = test_snapshot("tank/data", 1);
+        let second = test_snapshot("tank/data", 2);
+        let third = test_snapshot("tank/data", 3);
+        let remote_first = test_snapshot("backup/tank/data", 1);
+        let remote_third = test_snapshot("backup/tank/data", 3);
+
+        assert_eq!(
+            Vec::<(Option<Snapshot>, Snapshot)>::new(),
+            replication_plan(&[first, second, third], &[remote_first, remote_third])
+        );
+    }
+
+    #[test]
+    fn replication_plan_uses_latest_common_parent_for_new_snapshots() {
+        let first = test_snapshot("tank/data", 1);
+        let second = test_snapshot("tank/data", 2);
+        let third = test_snapshot("tank/data", 3);
+        let remote_first = test_snapshot("backup/tank/data", 1);
+
+        assert_eq!(
+            vec![
+                (Some(first), second.clone()),
+                (Some(second.clone()), third.clone())
+            ],
+            replication_plan(
+                &[test_snapshot("tank/data", 1), second, third],
+                &[remote_first]
+            )
+        );
+    }
+
+    #[test]
+    fn remote_prune_plan_keeps_newest_snapshots_for_time_unit() {
+        let first = test_snapshot("backup/tank/data", 1);
+        let second = test_snapshot("backup/tank/data", 2);
+        let third = test_snapshot("backup/tank/data", 3);
+
+        assert_eq!(
+            vec![first],
+            remote_prune_plan(
+                &[test_snapshot("backup/tank/data", 1), second, third],
+                &replication_config(2, 0)
+            )
+        );
+    }
+
+    #[test]
+    fn remote_prune_plan_zero_retention_skips_time_unit() {
+        assert_eq!(
+            Vec::<Snapshot>::new(),
+            remote_prune_plan(
+                &[
+                    test_snapshot("backup/tank/data", 1),
+                    test_snapshot("backup/tank/data", 2)
+                ],
+                &replication_config(0, 0)
+            )
+        );
+    }
+
+    #[test]
+    fn remote_prune_plan_prunes_remote_only_snapshots() {
+        let old_remote_only = test_snapshot_with_unit("backup/tank/data", 1, TimeUnit::Day);
+        let current = test_snapshot_with_unit("backup/tank/data", 2, TimeUnit::Day);
+
+        assert_eq!(
+            vec![old_remote_only],
+            remote_prune_plan(
+                &[
+                    test_snapshot_with_unit("backup/tank/data", 1, TimeUnit::Day),
+                    current
+                ],
+                &replication_config(0, 1)
+            )
+        );
+    }
+
+    fn test_snapshot(volume: &str, minute: u32) -> Snapshot {
+        test_snapshot_with_unit(volume, minute, TimeUnit::Hour)
+    }
+
+    fn test_snapshot_with_unit(volume: &str, minute: u32, time_unit: TimeUnit) -> Snapshot {
+        Snapshot {
+            volume: volume.into(),
+            prefix: "autosnap".into(),
+            date_time: Utc.from_utc_datetime(
+                &NaiveDate::from_ymd_opt(2021, 6, 14)
+                    .unwrap()
+                    .and_hms_opt(3, minute, 1)
+                    .unwrap(),
+            ),
+            time_unit,
+        }
+    }
+
+    fn replication_config(hourly: u16, daily: u16) -> ReplicationConfig {
+        ReplicationConfig {
+            host: "backup.example.com".into(),
+            dataset: "backup/tank/data".into(),
+            minutely: 0,
+            hourly,
+            daily,
+            monthly: 0,
+            yearly: 0,
+        }
     }
 }

@@ -1,6 +1,6 @@
-use crate::time_unit::TimeUnit;
 use crate::CompactString;
-use anyhow::{anyhow, Context, Error, Result};
+use crate::time_unit::TimeUnit;
+use anyhow::{Context, Error, Result, anyhow};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use serde::de::Error as SerdeError;
@@ -57,6 +57,36 @@ pub struct RemoteConfig {
     pub local_path: CompactString,
 }
 
+#[derive(Debug, Eq, PartialEq, Deserialize, Clone)]
+pub struct ReplicationConfig {
+    pub host: CompactString,
+    pub dataset: CompactString,
+    #[serde(default)]
+    pub minutely: u16,
+    #[serde(default)]
+    pub hourly: u16,
+    #[serde(default)]
+    pub daily: u16,
+    #[serde(default)]
+    pub monthly: u16,
+    #[serde(default)]
+    pub yearly: u16,
+}
+
+impl Index<TimeUnit> for ReplicationConfig {
+    type Output = u16;
+
+    fn index(&self, index: TimeUnit) -> &Self::Output {
+        match index {
+            TimeUnit::Minute => &self.minutely,
+            TimeUnit::Hour => &self.hourly,
+            TimeUnit::Day => &self.daily,
+            TimeUnit::Month => &self.monthly,
+            TimeUnit::Year => &self.yearly,
+        }
+    }
+}
+
 #[derive(Deserialize)]
 struct RawConfig {
     #[serde(default)]
@@ -82,6 +112,7 @@ struct RawVolumeConfig {
 #[serde(deny_unknown_fields)]
 struct RawBaseVolumeConfig {
     remote: Option<RemoteConfig>,
+    replication: Option<ReplicationConfig>,
     minutely: Option<u16>,
     hourly: Option<u16>,
     daily: Option<u16>,
@@ -97,6 +128,7 @@ pub struct VolumeConfig {
     pub monthly: u16,
     pub yearly: u16,
     pub remote: Option<RemoteConfig>,
+    pub replication: Option<ReplicationConfig>,
 }
 
 impl Index<TimeUnit> for VolumeConfig {
@@ -131,6 +163,10 @@ pub fn load_config(data: &str) -> Result<Config> {
             monthly: cfg.monthly.unwrap_or(defaults.monthly),
             yearly: cfg.yearly.unwrap_or(defaults.yearly),
             remote: cfg.remote.clone().or_else(|| defaults.remote.clone()),
+            replication: cfg
+                .replication
+                .clone()
+                .or_else(|| defaults.replication.clone()),
         }
     }
 
@@ -294,5 +330,52 @@ daily = 7
         );
         assert_eq!(vol2_cfg.remote.as_ref().unwrap().local_path, "/mnt/data2");
         assert_eq!(vol2_cfg.daily, 7);
+    }
+
+    #[test]
+    fn load_config_with_replication() {
+        const TEST_CONFIG: &str = r#"
+[templates.replicated]
+hourly = 2
+replication = { host = "backup1.example.com", dataset = "backup/tank/data", hourly = 72, daily = 30 }
+
+["tank/data"]
+template = "replicated"
+daily = 7
+
+["tank/logs"]
+replication = { host = "backup2.example.com", dataset = "backup/tank/logs", monthly = 12 }
+monthly = 3
+        "#;
+
+        let config = load_config(TEST_CONFIG).unwrap();
+
+        let data_cfg = config.volume_config.get("tank/data").unwrap();
+        assert_eq!(data_cfg.hourly, 2);
+        assert_eq!(data_cfg.daily, 7);
+        assert_eq!(
+            data_cfg.replication.as_ref().unwrap().host,
+            "backup1.example.com"
+        );
+        assert_eq!(
+            data_cfg.replication.as_ref().unwrap().dataset,
+            "backup/tank/data"
+        );
+        assert_eq!(data_cfg.replication.as_ref().unwrap().hourly, 72);
+        assert_eq!(data_cfg.replication.as_ref().unwrap().daily, 30);
+        assert_eq!(data_cfg.replication.as_ref().unwrap().monthly, 0);
+
+        let logs_cfg = config.volume_config.get("tank/logs").unwrap();
+        assert_eq!(logs_cfg.monthly, 3);
+        assert_eq!(
+            logs_cfg.replication.as_ref().unwrap().host,
+            "backup2.example.com"
+        );
+        assert_eq!(
+            logs_cfg.replication.as_ref().unwrap().dataset,
+            "backup/tank/logs"
+        );
+        assert_eq!(logs_cfg.replication.as_ref().unwrap().hourly, 0);
+        assert_eq!(logs_cfg.replication.as_ref().unwrap().monthly, 12);
     }
 }

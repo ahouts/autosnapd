@@ -1,6 +1,6 @@
+use crate::CompactString;
 use crate::cfg::SNAPSHOT_PREFIX_REGEX;
 use crate::time_unit::TimeUnit;
-use crate::CompactString;
 use anyhow::{Context, Error};
 use chrono::{DateTime, SecondsFormat, Utc};
 use once_cell::sync::Lazy;

@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Error};
+use anyhow::{Error, anyhow};
 use chrono::{DateTime, Datelike, Duration, NaiveDate, TimeZone};
 use std::fmt::{Display, Formatter};
 use std::ops::Add;
