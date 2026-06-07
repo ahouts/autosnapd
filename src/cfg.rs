@@ -57,6 +57,20 @@ pub struct RemoteConfig {
     pub local_path: CompactString,
 }
 
+#[derive(Debug, Eq, PartialEq, Deserialize, Clone)]
+pub struct ScriptConfig {
+    pub path: CompactString,
+    #[serde(default)]
+    pub args: Vec<CompactString>,
+}
+
+#[derive(Debug, Eq, PartialEq, Deserialize, Clone)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum SourceConfig {
+    Remote(RemoteConfig),
+    Script(ScriptConfig),
+}
+
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub struct ReplicationConfig {
     pub host: CompactString,
@@ -106,7 +120,7 @@ struct RawVolumeConfig {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawBaseVolumeConfig {
-    remote: Option<RemoteConfig>,
+    source: Option<SourceConfig>,
     replication: Option<RawReplicationConfig>,
     host: Option<CompactString>,
     dataset: Option<CompactString>,
@@ -137,7 +151,7 @@ pub struct VolumeConfig {
     pub daily: u16,
     pub monthly: u16,
     pub yearly: u16,
-    pub remote: Option<RemoteConfig>,
+    pub source: Option<SourceConfig>,
     pub replication: Option<ReplicationConfig>,
 }
 
@@ -176,7 +190,7 @@ pub fn load_config(data: &str) -> Result<Config> {
             daily: cfg.daily.unwrap_or(defaults.daily),
             monthly: cfg.monthly.unwrap_or(defaults.monthly),
             yearly: cfg.yearly.unwrap_or(defaults.yearly),
-            remote: cfg.remote.clone().or_else(|| defaults.remote.clone()),
+            source: cfg.source.clone().or_else(|| defaults.source.clone()),
             replication: match &cfg.replication {
                 Some(replication) => Some(resolve_replication(replication, templates)?),
                 None => defaults.replication.clone(),
@@ -242,7 +256,7 @@ pub fn load_config(data: &str) -> Result<Config> {
         .map(|(key, config)| {
             Ok((
                 key.clone(),
-                apply_defaults(&config, &VolumeConfig::default(), &raw_templates)?,
+                apply_defaults(config, &VolumeConfig::default(), &raw_templates)?,
             ))
         })
         .collect::<Result<HashMap<CompactString, VolumeConfig>>>()?;
@@ -357,52 +371,93 @@ daily = 7
     }
 
     #[test]
-    fn load_config_with_remote() {
+    fn load_config_with_sources() {
         const TEST_CONFIG: &str = r#"
 snapshot_prefix = "asdf"
 
 [templates.remote_backup]
 minutely = 1
 hourly = 2
-remote = { host = "server1.example.com", remote_path = "/data/backup", local_path = "/mnt/backup" }
+source = { type = "remote", host = "server1.example.com", remote_path = "/data/backup", local_path = "/mnt/backup" }
 
 ["volume1/remote"]
 template = "remote_backup"
 hourly = 4
 
 ["volume2/remote"]
-remote = { host = "server2.example.com", remote_path = "/var/lib/data", local_path = "/mnt/data2" }
+source = { type = "remote", host = "server2.example.com", remote_path = "/var/lib/data", local_path = "/mnt/data2" }
 daily = 7
+
+["volume3/script"]
+source = { type = "script", path = "/usr/local/bin/build-volume", args = ["--target", "/mnt/generated"] }
+monthly = 1
         "#;
 
         let config = load_config(TEST_CONFIG).unwrap();
 
-        // Check remote config from template
         let vol1_cfg = config.volume_config.get("volume1/remote").unwrap();
         assert_eq!(
-            vol1_cfg.remote.as_ref().unwrap().host,
-            "server1.example.com"
+            vol1_cfg.source,
+            Some(SourceConfig::Remote(RemoteConfig {
+                host: "server1.example.com".into(),
+                remote_path: "/data/backup".into(),
+                local_path: "/mnt/backup".into(),
+            }))
         );
-        assert_eq!(
-            vol1_cfg.remote.as_ref().unwrap().remote_path,
-            "/data/backup"
-        );
-        assert_eq!(vol1_cfg.remote.as_ref().unwrap().local_path, "/mnt/backup");
         assert_eq!(vol1_cfg.hourly, 4);
         assert_eq!(vol1_cfg.minutely, 1);
 
-        // Check direct remote config
         let vol2_cfg = config.volume_config.get("volume2/remote").unwrap();
         assert_eq!(
-            vol2_cfg.remote.as_ref().unwrap().host,
-            "server2.example.com"
+            vol2_cfg.source,
+            Some(SourceConfig::Remote(RemoteConfig {
+                host: "server2.example.com".into(),
+                remote_path: "/var/lib/data".into(),
+                local_path: "/mnt/data2".into(),
+            }))
         );
-        assert_eq!(
-            vol2_cfg.remote.as_ref().unwrap().remote_path,
-            "/var/lib/data"
-        );
-        assert_eq!(vol2_cfg.remote.as_ref().unwrap().local_path, "/mnt/data2");
         assert_eq!(vol2_cfg.daily, 7);
+
+        let vol3_cfg = config.volume_config.get("volume3/script").unwrap();
+        assert_eq!(
+            vol3_cfg.source,
+            Some(SourceConfig::Script(ScriptConfig {
+                path: "/usr/local/bin/build-volume".into(),
+                args: vec!["--target".into(), "/mnt/generated".into()],
+            }))
+        );
+        assert_eq!(vol3_cfg.monthly, 1);
+    }
+
+    #[test]
+    fn load_config_with_script_source_default_args() {
+        const TEST_CONFIG: &str = r#"
+["volume/script"]
+source = { type = "script", path = "/usr/local/bin/build-volume" }
+daily = 1
+        "#;
+
+        let config = load_config(TEST_CONFIG).unwrap();
+        let volume = config.volume_config.get("volume/script").unwrap();
+
+        assert_eq!(
+            volume.source,
+            Some(SourceConfig::Script(ScriptConfig {
+                path: "/usr/local/bin/build-volume".into(),
+                args: Vec::new(),
+            }))
+        );
+    }
+
+    #[test]
+    fn legacy_remote_config_is_rejected() {
+        const TEST_CONFIG: &str = r#"
+["volume/remote"]
+remote = { host = "server.example.com", remote_path = "/data", local_path = "/mnt/data" }
+daily = 1
+        "#;
+
+        assert!(load_config(TEST_CONFIG).is_err());
     }
 
     #[test]

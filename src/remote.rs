@@ -1,4 +1,4 @@
-use crate::cfg::ReplicationConfig;
+use crate::cfg::{ReplicationConfig, SourceConfig};
 use crate::snapshot::Snapshot;
 use crate::time_unit::TimeUnit;
 use anyhow::{Context, Result, anyhow};
@@ -16,8 +16,8 @@ use mockall::automock;
 
 #[async_trait]
 #[cfg_attr(test, automock)]
-pub trait RemoteApi {
-    async fn sync_remote(&self, host: &str, remote_path: &str, local_path: &str) -> Result<()>;
+pub trait SourceApi {
+    async fn run_source(&self, source: &SourceConfig) -> Result<()>;
 }
 
 #[async_trait]
@@ -44,8 +44,7 @@ impl RemoteCommand {
     }
 }
 
-#[async_trait]
-impl RemoteApi for RemoteCommand {
+impl RemoteCommand {
     async fn sync_remote(&self, host: &str, remote_path: &str, local_path: &str) -> Result<()> {
         log::debug!("syncing remote {}:{} to {}", host, remote_path, local_path);
 
@@ -88,6 +87,56 @@ impl RemoteApi for RemoteCommand {
         }
 
         Ok(())
+    }
+
+    async fn run_script(&self, path: &str, args: &[impl AsRef<str>]) -> Result<()> {
+        log::debug!("running source script {} with {} args", path, args.len());
+
+        let mut cmd = Command::new(path);
+        for arg in args {
+            cmd.arg(arg.as_ref());
+        }
+
+        let mut cmd = cmd
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .with_context(|| format!("failed to execute source script {}", path))?;
+
+        let mut stderr = String::new();
+        cmd.stderr
+            .as_mut()
+            .unwrap()
+            .read_to_string(&mut stderr)
+            .await
+            .with_context(|| "failed to read source script stderr")?;
+
+        let status = cmd.wait().await?;
+
+        if !status.success() {
+            return Err(anyhow!(
+                "source script {} failed with exit code {} and error:\n{}",
+                path,
+                status.code().unwrap_or(-1),
+                stderr.trim()
+            ));
+        }
+
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl SourceApi for RemoteCommand {
+    async fn run_source(&self, source: &SourceConfig) -> Result<()> {
+        match source {
+            SourceConfig::Remote(remote) => {
+                self.sync_remote(&remote.host, &remote.remote_path, &remote.local_path)
+                    .await
+            }
+            SourceConfig::Script(script) => self.run_script(&script.path, &script.args).await,
+        }
     }
 }
 
@@ -577,6 +626,16 @@ fn snapshots_for_time_unit(snapshots: &[Snapshot], time_unit: TimeUnit) -> Vec<S
 
 pub struct DryReplicationApi<A: ReplicationApi>(pub A);
 
+pub struct DrySourceApi<A: SourceApi>(pub A);
+
+#[async_trait]
+impl<A: SourceApi + Send + Sync> SourceApi for DrySourceApi<A> {
+    async fn run_source(&self, source: &SourceConfig) -> Result<()> {
+        log::info!("not running source, dry run: {:?}", source);
+        Ok(())
+    }
+}
+
 #[async_trait]
 impl<A: ReplicationApi + Send + Sync> ReplicationApi for DryReplicationApi<A> {
     async fn replicate_snapshots(
@@ -649,6 +708,31 @@ mod tests {
 
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("rsync failed"));
+    }
+
+    #[tokio::test]
+    async fn test_run_script_success() {
+        let remote = RemoteCommand::new(PathBuf::from("zfs"));
+        let result = remote
+            .run_script(
+                "sh",
+                &["-c", "test \"$1\" = expected", "script-name", "expected"],
+            )
+            .await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_script_failure() {
+        let remote = RemoteCommand::new(PathBuf::from("zfs"));
+        let result = remote
+            .run_script("sh", &["-c", "echo script failed >&2; exit 7"])
+            .await;
+
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("source script sh failed with exit code 7"));
+        assert!(error.contains("script failed"));
     }
 
     #[test]
