@@ -1,6 +1,6 @@
 [package]
 name = "autosnapd"
-version = "0.4.3"
+version = "0.4.4"
 authors = ["Andrew Houts <ahouts4@gmail.com>"]
 edition = "2024"
 

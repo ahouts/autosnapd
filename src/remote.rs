@@ -477,7 +477,7 @@ enum SendRequest<'a> {
 fn zfs_send_args(request: SendRequest<'_>) -> Vec<String> {
     match request {
         SendRequest::Snapshot { parent, snapshot } => {
-            let mut args = vec![String::from("send")];
+            let mut args = vec![String::from("send"), String::from("-w")];
             if let Some(parent) = parent {
                 args.push(String::from("-i"));
                 args.push(parent.to_string());
@@ -728,6 +728,7 @@ mod tests {
         assert_eq!(
             vec![
                 "send".to_string(),
+                "-w".to_string(),
                 "tank/data@autosnap_2021-06-14T03:01:01Z_hourly".to_string()
             ],
             zfs_send_args(SendRequest::Snapshot {
@@ -745,6 +746,7 @@ mod tests {
         assert_eq!(
             vec![
                 "send".to_string(),
+                "-w".to_string(),
                 "-i".to_string(),
                 "tank/data@autosnap_2021-06-14T03:01:01Z_hourly".to_string(),
                 "tank/data@autosnap_2021-06-14T03:02:01Z_hourly".to_string()
@@ -758,6 +760,8 @@ mod tests {
 
     #[test]
     fn zfs_send_args_builds_resume_send() {
+        // Resume tokens encode the interrupted stream; resumability is created
+        // by zfs receive -s and continued with zfs send -t <token>.
         assert_eq!(
             vec![
                 "send".to_string(),
