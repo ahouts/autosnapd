@@ -19,6 +19,8 @@ use tokio::{io::BufReader, process::Command};
 pub trait ZfsApi {
     async fn snapshots(&self, volume: &str) -> Result<Vec<Snapshot>>;
 
+    async fn is_mounted(&self, volume: &str) -> Result<bool>;
+
     async fn take_snapshot(&self, snapshot: &Snapshot) -> Result<()>;
 
     async fn remove_snapshot(&self, snapshot: &Snapshot) -> Result<()>;
@@ -68,6 +70,27 @@ impl ZfsApi for ZfsApiImpl {
                     }
 
                     Ok(results) as Result<Vec<Snapshot>>
+                })
+            },
+        )
+        .await?
+    }
+
+    async fn is_mounted(&self, volume: &str) -> Result<bool> {
+        let volume_name = volume.to_string();
+        let volume_arg = volume_name.clone();
+        exec(
+            &self.zfs_path,
+            &["get", "-H", "-o", "value", "mounted", volume_arg.as_str()],
+            |stdout| {
+                Box::pin(async move {
+                    let mut output = String::new();
+                    BufReader::new(stdout)
+                        .read_to_string(&mut output)
+                        .await
+                        .with_context(|| "error reading output from zfs get mounted")?;
+
+                    parse_mounted_value(&volume_name, &output)
                 })
             },
         )
@@ -146,12 +169,28 @@ async fn exec<
     result.with_context(|| format!("error handling output from zfs {:?}", args))
 }
 
+fn parse_mounted_value(volume: &str, output: &str) -> Result<bool> {
+    match output.trim() {
+        "yes" => Ok(true),
+        "no" => Ok(false),
+        value => Err(anyhow!(
+            "unexpected mounted value for {}: {}",
+            volume,
+            value
+        )),
+    }
+}
+
 pub struct DryZfsApi<A: ZfsApi>(pub A);
 
 #[async_trait]
 impl<A: ZfsApi + Send + Sync> ZfsApi for DryZfsApi<A> {
     async fn snapshots(&self, volume: &str) -> Result<Vec<Snapshot>> {
         self.0.snapshots(volume).await
+    }
+
+    async fn is_mounted(&self, volume: &str) -> Result<bool> {
+        self.0.is_mounted(volume).await
     }
 
     async fn take_snapshot(&self, snapshot: &Snapshot) -> Result<()> {
@@ -162,5 +201,28 @@ impl<A: ZfsApi + Send + Sync> ZfsApi for DryZfsApi<A> {
     async fn remove_snapshot(&self, snapshot: &Snapshot) -> Result<()> {
         log::info!("not removing snapshot, dry run: {}", snapshot);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_mounted_value_returns_true_for_yes() {
+        assert!(parse_mounted_value("tank/yes", "yes\n").unwrap());
+    }
+
+    #[test]
+    fn parse_mounted_value_returns_false_for_no() {
+        assert!(!parse_mounted_value("tank/no", "no\n").unwrap());
+    }
+
+    #[test]
+    fn parse_mounted_value_rejects_unexpected_output() {
+        let error = parse_mounted_value("tank/maybe", "maybe\n")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unexpected mounted value for tank/maybe: maybe"));
     }
 }

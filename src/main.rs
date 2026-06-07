@@ -128,6 +128,7 @@ async fn handle_snapshots_for_volume<A: ZfsApi, C: Clock, S: SourceApi, P: Repli
     let mut snapshots_for_replication = snapshots.clone();
     sort_snapshots(&mut snapshots);
     let mut prune_work = Vec::new();
+    let mut source_volume_mounted = None;
 
     for time_unit in TimeUnit::iter() {
         let group = snapshots_for_time_unit(&snapshots, time_unit);
@@ -142,6 +143,27 @@ async fn handle_snapshots_for_volume<A: ZfsApi, C: Clock, S: SourceApi, P: Repli
         }
 
         if let Some(source) = &volume_config.source {
+            let is_mounted = match source_volume_mounted {
+                Some(is_mounted) => is_mounted,
+                None => {
+                    let is_mounted = zfs_api
+                        .is_mounted(volume)
+                        .await
+                        .with_context(|| format!("error checking whether {} is mounted", volume))?;
+                    source_volume_mounted = Some(is_mounted);
+                    is_mounted
+                }
+            };
+
+            if !is_mounted {
+                log::warn!(
+                    "skipping source execution and snapshot for {}, volume is not mounted",
+                    volume
+                );
+                prune_work.push((group, desired_count, false));
+                continue;
+            }
+
             match source_api.run_source(source).await {
                 Ok(_) => log::debug!("successfully ran source for {}", volume),
                 Err(e) => {
@@ -460,6 +482,12 @@ mod tests {
             .returning(|_| Box::pin(async { Ok(vec![]) }));
 
         mock_zfs
+            .expect_is_mounted()
+            .with(eq("tank/data"))
+            .times(1)
+            .returning(|_| Box::pin(async { Ok(true) }));
+
+        mock_zfs
             .expect_take_snapshot()
             .times(1)
             .returning(|_| Box::pin(async { Ok(()) }));
@@ -519,6 +547,12 @@ mod tests {
             .with(eq("tank/data"))
             .times(1)
             .returning(|_| Box::pin(async { Ok(vec![]) }));
+
+        mock_zfs
+            .expect_is_mounted()
+            .with(eq("tank/data"))
+            .times(1)
+            .returning(|_| Box::pin(async { Ok(true) }));
 
         mock_zfs.expect_take_snapshot().times(0);
 
@@ -584,6 +618,12 @@ mod tests {
             .returning(|_| Box::pin(async { Ok(vec![]) }));
 
         mock_zfs
+            .expect_is_mounted()
+            .with(eq("tank/data"))
+            .times(1)
+            .returning(|_| Box::pin(async { Ok(true) }));
+
+        mock_zfs
             .expect_take_snapshot()
             .times(1)
             .returning(|_| Box::pin(async { Ok(()) }));
@@ -591,6 +631,83 @@ mod tests {
         let volume_config = VolumeConfig {
             minutely: 1,
             source: Some(source),
+            ..VolumeConfig::default()
+        };
+
+        let config = Config {
+            snapshot_prefix: SnapshotPrefix(CompactString::from("autosnap")),
+            volume_config: HashMap::new(),
+        };
+
+        let result = handle_snapshots_for_volume(
+            &mock_zfs,
+            &mock_clock,
+            &mock_source,
+            &mock_replication,
+            "tank/data",
+            &volume_config,
+            &config,
+        )
+        .await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_handle_snapshots_for_volume_skips_source_and_snapshot_when_unmounted() {
+        let mut mock_zfs = MockZfsApi::new();
+        let mut mock_clock = MockClock::new();
+        let mut mock_source = MockSourceApi::new();
+        let mut mock_replication = MockReplicationApi::new();
+
+        let older = test_snapshot("tank/data", 7, 1, 0, TimeUnit::Minute);
+        let old = test_snapshot("tank/data", 7, 2, 0, TimeUnit::Minute);
+        let now = Utc.from_utc_datetime(
+            &NaiveDate::from_ymd_opt(2021, 5, 6)
+                .unwrap()
+                .and_hms_opt(7, 3, 1)
+                .unwrap(),
+        );
+
+        mock_clock.expect_current().times(1).returning(move || now);
+        mock_source.expect_run_source().times(0);
+        mock_zfs
+            .expect_snapshots()
+            .with(eq("tank/data"))
+            .times(1)
+            .returning(move |_| {
+                let snapshots = vec![older.clone(), old.clone()];
+                Box::pin(async move { Ok(snapshots) })
+            });
+        mock_zfs
+            .expect_is_mounted()
+            .with(eq("tank/data"))
+            .times(1)
+            .returning(|_| Box::pin(async { Ok(false) }));
+        mock_zfs.expect_take_snapshot().times(0);
+        mock_replication
+            .expect_replicate_snapshots()
+            .withf(|volume, host, dataset, snapshots| {
+                volume == "tank/data"
+                    && host == "backup.example.com"
+                    && dataset == "backup/tank/data"
+                    && snapshots.len() == 2
+            })
+            .times(1)
+            .returning(|_, _, _, _| Box::pin(async { Ok(()) }));
+        mock_replication
+            .expect_prune_snapshots()
+            .times(1)
+            .returning(|_| Box::pin(async { Ok(()) }));
+        mock_zfs
+            .expect_remove_snapshot()
+            .times(1)
+            .returning(|_| Box::pin(async { Ok(()) }));
+
+        let volume_config = VolumeConfig {
+            minutely: 1,
+            source: Some(remote_source_config()),
+            replication: Some(replication_config()),
             ..VolumeConfig::default()
         };
 
