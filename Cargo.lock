@@ -115,27 +115,47 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "autosnapd"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "anyhow",
  "async-trait",
+ "autosnapd-core",
  "blanket",
  "chrono",
  "env_logger",
  "futures",
  "log",
  "mockall",
- "once_cell",
- "regex",
- "serde",
  "slice-group-by",
  "smartstring",
  "structopt",
  "strum",
- "strum_macros",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "autosnapd-core"
+version = "0.5.2"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "log",
+ "once_cell",
+ "regex",
+ "serde",
+ "smartstring",
+ "strum",
+ "strum_macros",
  "toml",
+]
+
+[[package]]
+name = "autosnapd-ssh-command"
+version = "0.5.2"
+dependencies = [
+ "anyhow",
+ "autosnapd-core",
 ]
 
 [[package]]

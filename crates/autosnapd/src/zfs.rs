@@ -1,6 +1,6 @@
-use crate::snapshot::Snapshot;
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
+use autosnapd_core::Snapshot;
 use blanket::blanket;
 use futures::Future;
 #[cfg(test)]

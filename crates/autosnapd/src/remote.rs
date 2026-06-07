@@ -1,8 +1,9 @@
-use crate::cfg::{ReplicationConfig, SourceConfig};
-use crate::snapshot::Snapshot;
-use crate::time_unit::TimeUnit;
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
+use autosnapd_core::{
+    ReplicationConfig, Snapshot, SourceConfig, TimeUnit, remote_receive_args,
+    remote_receive_resume_token_args, remote_snapshot_list_args, remote_snapshot_remove_args,
+};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::{ExitStatus, Stdio};
@@ -234,18 +235,10 @@ impl RemoteCommand {
         remote_host: &str,
         remote_dataset: &str,
     ) -> Result<Vec<Snapshot>> {
+        let remote_args = remote_snapshot_list_args(remote_dataset)?;
         let cmd = Command::new("ssh")
             .arg(remote_host)
-            .args([
-                "zfs",
-                "list",
-                "-H",
-                "-o",
-                "name",
-                "-t",
-                "snapshot",
-                remote_dataset,
-            ])
+            .args(remote_args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -293,17 +286,10 @@ impl RemoteCommand {
         remote_host: &str,
         remote_dataset: &str,
     ) -> Result<Option<String>> {
+        let remote_args = remote_receive_resume_token_args(remote_dataset)?;
         let cmd = Command::new("ssh")
             .arg(remote_host)
-            .args([
-                "zfs",
-                "get",
-                "-H",
-                "-o",
-                "value",
-                "receive_resume_token",
-                remote_dataset,
-            ])
+            .args(remote_args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -396,9 +382,10 @@ impl RemoteCommand {
             .spawn()
             .with_context(|| format!("failed to execute zfs {:?}", send_args))?;
 
+        let remote_args = remote_receive_args(remote_dataset)?;
         let mut receive = Command::new("ssh")
             .arg(remote_host)
-            .args(zfs_receive_args(remote_dataset))
+            .args(remote_args)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -459,9 +446,10 @@ impl RemoteCommand {
     async fn remove_snapshot(&self, remote_host: &str, snapshot: &Snapshot) -> Result<()> {
         log::info!("removing remote snapshot {}:{}", remote_host, snapshot);
 
+        let remote_args = remote_snapshot_remove_args(snapshot)?;
         let mut cmd = Command::new("ssh")
             .arg(remote_host)
-            .args(["zfs", "destroy", &snapshot.to_string()])
+            .args(remote_args)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -538,16 +526,6 @@ fn zfs_send_args(request: SendRequest<'_>) -> Vec<String> {
             vec![String::from("send"), String::from("-t"), token.to_string()]
         }
     }
-}
-
-fn zfs_receive_args(remote_dataset: &str) -> Vec<String> {
-    vec![
-        String::from("zfs"),
-        String::from("receive"),
-        String::from("-s"),
-        String::from("-u"),
-        remote_dataset.to_string(),
-    ]
 }
 
 fn parse_receive_resume_token(output: &str) -> Option<String> {
@@ -866,7 +844,7 @@ mod tests {
                 "-u".to_string(),
                 "backup/tank/data".to_string()
             ],
-            zfs_receive_args("backup/tank/data")
+            remote_receive_args("backup/tank/data").unwrap()
         );
     }
 

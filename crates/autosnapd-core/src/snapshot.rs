@@ -1,5 +1,6 @@
 use crate::CompactString;
 use crate::cfg::SNAPSHOT_PREFIX_REGEX;
+use crate::remote_command::validate_dataset_name;
 use crate::time_unit::TimeUnit;
 use anyhow::{Context, Error};
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -52,7 +53,7 @@ impl Snapshot {
 static SNAPSHOT_REGEX: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
         format!(
-            r"^([-a-zA-Z0-9 ,_.:/]+)@({})_([-0-9T:.TZ+]+)_([a-z]+)$",
+            r"^([-a-zA-Z0-9,_.:/]+)@({})_([-0-9T:.TZ+]+)_([a-z]+)$",
             SNAPSHOT_PREFIX_REGEX
         )
         .as_str(),
@@ -68,6 +69,8 @@ impl FromStr for Snapshot {
             .captures(s)
             .with_context(|| format!("error matching snapshot to pattern: {}", s))?;
         let volume = captures.get(1).unwrap().as_str();
+        validate_dataset_name(volume)
+            .with_context(|| format!("invalid snapshot dataset: {}", volume))?;
         let prefix = captures.get(2).unwrap().as_str();
         let date_time = captures.get(3).unwrap().as_str();
         let time_unit = captures.get(4).unwrap().as_str();
@@ -104,7 +107,7 @@ mod tests {
     fn from_str() {
         assert_eq!(
             Snapshot {
-                volume: CompactString::from("zroot/test::dt,1._- /volume123"),
+                volume: CompactString::from("zroot/test::dt,1._-/volume123"),
                 prefix: CompactString::from("autosnap"),
                 date_time: Utc
                     .from_utc_datetime(
@@ -117,7 +120,7 @@ mod tests {
                 time_unit: TimeUnit::Hour
             },
             Snapshot::from_str(
-                "zroot/test::dt,1._- /volume123@autosnap_2021-06-14T03:21:01Z_hourly"
+                "zroot/test::dt,1._-/volume123@autosnap_2021-06-14T03:21:01Z_hourly"
             )
             .unwrap()
         )
@@ -146,7 +149,7 @@ mod tests {
     #[test]
     fn round_trip() {
         let snapshot = Snapshot {
-            volume: CompactString::from("zroot/test::dt,1._ /volume123"),
+            volume: CompactString::from("zroot/test::dt,1._/volume123"),
             prefix: CompactString::from("autosnap"),
             date_time: Utc
                 .from_utc_datetime(
@@ -163,5 +166,12 @@ mod tests {
             snapshot,
             Snapshot::from_str(format!("{}", &snapshot).as_str()).unwrap()
         )
+    }
+
+    #[test]
+    fn rejects_whitespace_in_dataset() {
+        assert!(
+            Snapshot::from_str("zroot/test data@autosnap_2021-06-14T03:21:01Z_hourly").is_err()
+        );
     }
 }

@@ -1,4 +1,5 @@
 use crate::CompactString;
+use crate::remote_command::validate_dataset_name;
 use crate::time_unit::TimeUnit;
 use anyhow::{Context, Error, Result, anyhow};
 use once_cell::sync::Lazy;
@@ -222,6 +223,8 @@ pub fn load_config(data: &str) -> Result<Config> {
             .clone()
             .or_else(|| template.and_then(|template| template.dataset.clone()))
             .with_context(|| "replication config missing dataset")?;
+        validate_dataset_name(&dataset)
+            .with_context(|| format!("invalid replication dataset: {}", dataset))?;
 
         Ok(ReplicationConfig {
             host,
@@ -267,6 +270,8 @@ pub fn load_config(data: &str) -> Result<Config> {
             .configs
             .into_iter()
             .map(|(key, config)| {
+                validate_dataset_name(&key)
+                    .with_context(|| format!("invalid volume dataset: {}", key))?;
                 if let Some(template_name) = &config.template {
                     if let Some(template) = templates.get(template_name) {
                         Ok((key, apply_defaults(&config.base, template, &raw_templates)?))
@@ -367,6 +372,36 @@ daily = 7
                 .unwrap_err()
                 .to_string()
                 .as_str()
+        );
+    }
+
+    #[test]
+    fn load_config_rejects_volume_dataset_with_whitespace() {
+        const TEST_CONFIG: &str = r#"
+["tank/data set"]
+daily = 1
+        "#;
+
+        assert!(
+            load_config(TEST_CONFIG)
+                .unwrap_err()
+                .to_string()
+                .contains("invalid volume dataset")
+        );
+    }
+
+    #[test]
+    fn load_config_rejects_replication_dataset_with_whitespace() {
+        const TEST_CONFIG: &str = r#"
+["tank/data"]
+replication = { host = "backup.example.com", dataset = "backup/tank/data set" }
+        "#;
+
+        assert!(
+            load_config(TEST_CONFIG)
+                .unwrap_err()
+                .to_string()
+                .contains("invalid replication dataset")
         );
     }
 

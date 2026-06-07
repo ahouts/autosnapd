@@ -1,28 +1,21 @@
-use crate::cfg::{Config, VolumeConfig};
 use crate::clock::{Clock, ClockImpl};
 use crate::remote::{DryReplicationApi, DrySourceApi, RemoteCommand, ReplicationApi, SourceApi};
-use crate::time_unit::TimeUnit;
 use crate::zfs::{DryZfsApi, ZfsApi, ZfsApiImpl};
 use anyhow::{Context, Result};
+use autosnapd_core::{Config, Snapshot, TimeUnit, VolumeConfig, cfg};
 use chrono::{DateTime, Utc};
 use futures::FutureExt;
 use futures::lock::Mutex;
 use futures::select;
 use slice_group_by::GroupBy;
-use smartstring::{LazyCompact, SmartString};
-use snapshot::Snapshot;
+use smartstring::SmartString;
 use std::path::PathBuf;
 use std::time::Duration;
 use structopt::StructOpt;
 use strum::IntoEnumIterator;
 
-type CompactString = SmartString<LazyCompact>;
-
-mod cfg;
 mod clock;
 mod remote;
-mod snapshot;
-mod time_unit;
 mod zfs;
 
 #[derive(StructOpt)]
@@ -330,10 +323,12 @@ async fn take_snapshot<A: ZfsApi>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cfg::{RemoteConfig, ReplicationConfig, ScriptConfig, SnapshotPrefix, SourceConfig};
     use crate::clock::MockClock;
     use crate::remote::{MockReplicationApi, MockSourceApi};
     use crate::zfs::MockZfsApi;
+    use autosnapd_core::{
+        CompactString, RemoteConfig, ReplicationConfig, ScriptConfig, SnapshotPrefix, SourceConfig,
+    };
     use chrono::{NaiveDate, TimeZone, Utc};
     use mockall::Sequence;
     use mockall::predicate::eq;
