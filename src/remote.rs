@@ -682,6 +682,23 @@ mod tests {
     }
 
     #[test]
+    fn replication_plan_preserves_input_order_for_tied_snapshot_times() {
+        let first = test_snapshot_with_unit("tank/data", 1, TimeUnit::Day);
+        let second = test_snapshot_with_unit("tank/data", 1, TimeUnit::Hour);
+
+        assert_eq!(
+            vec![(None, first.clone()), (Some(first), second.clone())],
+            replication_plan(
+                &[
+                    test_snapshot_with_unit("tank/data", 1, TimeUnit::Day),
+                    second
+                ],
+                &[]
+            )
+        );
+    }
+
+    #[test]
     fn zfs_send_args_builds_full_send() {
         let snapshot = test_snapshot("tank/data", 1);
 

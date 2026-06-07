@@ -125,6 +125,7 @@ async fn handle_snapshots_for_volume<A: ZfsApi, C: Clock, R: RemoteApi, P: Repli
     config: &Config,
 ) -> Result<()> {
     let mut snapshots = zfs_api.snapshots(volume).await?;
+    let mut snapshots_for_replication = snapshots.clone();
     sort_snapshots(&mut snapshots);
     let mut prune_work = Vec::new();
 
@@ -174,7 +175,8 @@ async fn handle_snapshots_for_volume<A: ZfsApi, C: Clock, R: RemoteApi, P: Repli
         .await?;
 
         let snapshot_taken = if let Some(snapshot) = snapshot_taken {
-            snapshots.push(snapshot);
+            snapshots.push(snapshot.clone());
+            snapshots_for_replication.push(snapshot);
             sort_snapshots(&mut snapshots);
             true
         } else {
@@ -189,7 +191,7 @@ async fn handle_snapshots_for_volume<A: ZfsApi, C: Clock, R: RemoteApi, P: Repli
                 volume,
                 &replication.host,
                 &replication.dataset,
-                snapshots.as_slice(),
+                snapshots_for_replication.as_slice(),
             )
             .await
         {
@@ -741,6 +743,77 @@ mod tests {
 
         let volume_config = VolumeConfig {
             minutely: 1,
+            replication: Some(replication_config()),
+            ..VolumeConfig::default()
+        };
+
+        let config = Config {
+            snapshot_prefix: SnapshotPrefix(CompactString::from("autosnap")),
+            volume_config: HashMap::new(),
+        };
+
+        let result = handle_snapshots_for_volume(
+            &mock_zfs,
+            &mock_clock,
+            &mock_remote,
+            &mock_replication,
+            "tank/data",
+            &volume_config,
+            &config,
+        )
+        .await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_handle_snapshots_for_volume_preserves_zfs_order_for_replication() {
+        let mut mock_zfs = MockZfsApi::new();
+        let mut mock_clock = MockClock::new();
+        let mut mock_remote = MockRemoteApi::new();
+        let mut mock_replication = MockReplicationApi::new();
+
+        let daily = test_snapshot("tank/data", 7, 3, 0, TimeUnit::Day);
+        let hourly = test_snapshot("tank/data", 7, 3, 0, TimeUnit::Hour);
+        let now = Utc.from_utc_datetime(
+            &NaiveDate::from_ymd_opt(2021, 5, 6)
+                .unwrap()
+                .and_hms_opt(7, 3, 30)
+                .unwrap(),
+        );
+
+        mock_clock.expect_current().times(2).returning(move || now);
+        mock_remote.expect_sync_remote().times(0);
+        mock_zfs
+            .expect_snapshots()
+            .with(eq("tank/data"))
+            .times(1)
+            .returning(move |_| {
+                let snapshots = vec![daily.clone(), hourly.clone()];
+                Box::pin(async move { Ok(snapshots) })
+            });
+        mock_zfs.expect_take_snapshot().times(0);
+        mock_zfs.expect_remove_snapshot().times(0);
+        mock_replication
+            .expect_replicate_snapshots()
+            .withf(|volume, host, dataset, snapshots| {
+                volume == "tank/data"
+                    && host == "backup.example.com"
+                    && dataset == "backup/tank/data"
+                    && snapshots.len() == 2
+                    && snapshots[0].time_unit == TimeUnit::Day
+                    && snapshots[1].time_unit == TimeUnit::Hour
+            })
+            .times(1)
+            .returning(|_, _, _, _| Box::pin(async { Ok(()) }));
+        mock_replication
+            .expect_prune_snapshots()
+            .times(1)
+            .returning(|_| Box::pin(async { Ok(()) }));
+
+        let volume_config = VolumeConfig {
+            hourly: 1,
+            daily: 1,
             replication: Some(replication_config()),
             ..VolumeConfig::default()
         };
