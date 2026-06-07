@@ -207,6 +207,15 @@ impl RemoteCommand {
             .await
             .with_context(|| "failed to read remote zfs list output")?;
         if !status.success() {
+            if is_dataset_missing_error(remote_dataset, &stderr) {
+                log::debug!(
+                    "remote dataset {}:{} does not exist, treating remote snapshot list as empty",
+                    remote_host,
+                    remote_dataset
+                );
+                return Ok(Vec::new());
+            }
+
             return Err(anyhow!(
                 "remote zfs list failed with exit code {} and error:\n{}",
                 status.code().unwrap_or(-1),
@@ -256,6 +265,15 @@ impl RemoteCommand {
             .await
             .with_context(|| "failed to read remote zfs receive_resume_token output")?;
         if !status.success() {
+            if is_dataset_missing_error(remote_dataset, &stderr) {
+                log::debug!(
+                    "remote dataset {}:{} does not exist, treating receive resume token as absent",
+                    remote_host,
+                    remote_dataset
+                );
+                return Ok(None);
+            }
+
             return Err(anyhow!(
                 "remote zfs get receive_resume_token failed with exit code {} and error:\n{}",
                 status.code().unwrap_or(-1),
@@ -339,37 +357,36 @@ impl RemoteCommand {
             .with_context(|| format!("failed to execute remote zfs receive on {}", remote_host))?;
 
         let mut send_stdout = send.stdout.take().unwrap();
+        let mut send_err = send.stderr.take().unwrap();
         let mut receive_stdin = receive.stdin.take().unwrap();
+        let mut receive_err = receive.stderr.take().unwrap();
         let mut send_stderr = String::new();
         let mut receive_stderr = String::new();
-        let (pipe_result, send_stderr_result, receive_stderr_result) = tokio::join!(
+        let (result, _, _) = tokio::join!(
             async {
-                let result = tokio::io::copy(&mut send_stdout, &mut receive_stdin).await;
-                receive_stdin.shutdown().await?;
+                let result = tokio::try_join!(
+                    async {
+                        let result = tokio::io::copy(&mut send_stdout, &mut receive_stdin).await;
+                        receive_stdin.shutdown().await?;
+                        result
+                    },
+                    async { send.wait().await },
+                    async { receive.wait().await }
+                )
+                .context("piping snapshot over SSH");
+                let _ = send.start_kill();
+                let _ = receive.start_kill();
                 result
             },
-            async {
-                send.stderr
-                    .as_mut()
-                    .unwrap()
-                    .read_to_string(&mut send_stderr)
-                    .await
-            },
-            async {
-                receive
-                    .stderr
-                    .as_mut()
-                    .unwrap()
-                    .read_to_string(&mut receive_stderr)
-                    .await
-            }
+            async { send_err.read_to_string(&mut send_stderr).await },
+            async { receive_err.read_to_string(&mut receive_stderr).await },
         );
-        pipe_result.with_context(|| "error piping zfs send to remote zfs receive")?;
-        send_stderr_result.with_context(|| "error reading zfs send stderr")?;
-        receive_stderr_result.with_context(|| "error reading remote zfs receive stderr")?;
 
-        let send_status = send.wait().await?;
-        let receive_status = receive.wait().await?;
+        let (bytes_sent, send_status, receive_status) = result.with_context(|| {
+            format!("send stderr: {send_stderr}\nrecv stderr: {receive_stderr}")
+        })?;
+
+        log::debug!("sent {bytes_sent} bytes");
 
         if !send_status.success() {
             return Err(anyhow!(
@@ -491,6 +508,12 @@ fn parse_receive_resume_token(output: &str) -> Option<String> {
     } else {
         Some(token.to_string())
     }
+}
+
+fn is_dataset_missing_error(dataset: &str, stderr: &str) -> bool {
+    stderr
+        .lines()
+        .any(|line| line.trim() == format!("cannot open '{}': dataset does not exist", dataset))
 }
 
 fn snapshot_key(snapshot: &Snapshot) -> String {
@@ -772,6 +795,30 @@ mod tests {
             Some("1-token-value".to_string()),
             parse_receive_resume_token(" 1-token-value\n")
         );
+    }
+
+    #[test]
+    fn is_dataset_missing_error_matches_requested_dataset() {
+        assert!(is_dataset_missing_error(
+            "vol/abc",
+            "cannot open 'vol/abc': dataset does not exist\n"
+        ));
+    }
+
+    #[test]
+    fn is_dataset_missing_error_ignores_other_datasets() {
+        assert!(!is_dataset_missing_error(
+            "vol/abc",
+            "cannot open 'vol/def': dataset does not exist\n"
+        ));
+    }
+
+    #[test]
+    fn is_dataset_missing_error_ignores_unrelated_errors() {
+        assert!(!is_dataset_missing_error(
+            "vol/abc",
+            "cannot open 'vol/abc': permission denied\n"
+        ));
     }
 
     #[test]

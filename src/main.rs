@@ -154,12 +154,12 @@ async fn handle_snapshots_for_volume<A: ZfsApi, C: Clock, R: RemoteApi, P: Repli
                 ),
                 Err(e) => {
                     log::error!(
-                        "failed to sync remote {}:{} to {}: {}",
+                        "failed to sync remote {}:{} to {}",
                         remote.host,
                         remote.remote_path,
-                        &remote.local_path,
-                        e
+                        &remote.local_path
                     );
+                    log_error_chain(&e);
                     return Ok(());
                 }
             }
@@ -203,23 +203,23 @@ async fn handle_snapshots_for_volume<A: ZfsApi, C: Clock, R: RemoteApi, P: Repli
             ),
             Err(e) => {
                 log::error!(
-                    "failed to replicate snapshots for {} to {}:{}: {}",
+                    "failed to replicate snapshots for {} to {}:{}",
                     volume,
                     replication.host,
-                    replication.dataset,
-                    e
+                    replication.dataset
                 );
+                log_error_chain(&e);
                 return Ok(());
             }
         }
 
         if let Err(e) = replication_api.prune_snapshots(replication).await {
             log::error!(
-                "failed to prune remote snapshots for {}:{}: {}",
+                "failed to prune remote snapshots for {}:{}",
                 replication.host,
-                replication.dataset,
-                e
+                replication.dataset
             );
+            log_error_chain(&e);
         }
     }
 
@@ -228,6 +228,16 @@ async fn handle_snapshots_for_volume<A: ZfsApi, C: Clock, R: RemoteApi, P: Repli
     }
 
     Ok(())
+}
+
+fn log_error_chain(err: &anyhow::Error) {
+    for (i, cause) in err.chain().enumerate() {
+        if i == 0 {
+            log::error!("Error: {}", cause);
+        } else {
+            log::error!("  Caused by: {}", cause);
+        }
+    }
 }
 
 fn sort_snapshots(snapshots: &mut [Snapshot]) {
