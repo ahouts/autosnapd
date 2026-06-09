@@ -9,6 +9,7 @@ use serde::{Deserialize, Deserializer};
 use std::collections::HashMap;
 use std::ops::Index;
 use std::str::FromStr;
+use strum::IntoEnumIterator;
 
 #[derive(Debug, Eq, PartialEq, Hash)]
 pub struct SnapshotPrefix(pub CompactString);
@@ -252,6 +253,25 @@ pub fn load_config(data: &str) -> Result<Config> {
         })
     }
 
+    fn validate_replication_retention(volume: &str, config: &VolumeConfig) -> Result<()> {
+        if let Some(replication) = &config.replication {
+            for time_unit in TimeUnit::iter() {
+                let replication_count = replication[time_unit];
+                if replication_count > 0 && config[time_unit] == 0 {
+                    return Err(anyhow!(
+                        "replication retention for {} {} is {}, but local {} retention is 0",
+                        volume,
+                        time_unit,
+                        replication_count,
+                        time_unit
+                    ));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     let raw_templates = raw_cfg.templates.0;
 
     let templates: HashMap<CompactString, VolumeConfig> = raw_templates
@@ -264,28 +284,30 @@ pub fn load_config(data: &str) -> Result<Config> {
         })
         .collect::<Result<HashMap<CompactString, VolumeConfig>>>()?;
 
+    let volume_config = raw_cfg
+        .configs
+        .into_iter()
+        .map(|(key, config)| {
+            validate_dataset_name(&key)
+                .with_context(|| format!("invalid volume dataset: {}", key))?;
+            let resolved_config = if let Some(template_name) = &config.template {
+                if let Some(template) = templates.get(template_name) {
+                    apply_defaults(&config.base, template, &raw_templates)?
+                } else {
+                    return Err(anyhow!("unknown template: {}", template_name));
+                }
+            } else {
+                apply_defaults(&config.base, &VolumeConfig::default(), &raw_templates)?
+            };
+
+            validate_replication_retention(&key, &resolved_config)?;
+            Ok((key, resolved_config))
+        })
+        .collect::<Result<HashMap<CompactString, VolumeConfig>>>()?;
+
     Ok(Config {
         snapshot_prefix: raw_cfg.snapshot_prefix,
-        volume_config: raw_cfg
-            .configs
-            .into_iter()
-            .map(|(key, config)| {
-                validate_dataset_name(&key)
-                    .with_context(|| format!("invalid volume dataset: {}", key))?;
-                if let Some(template_name) = &config.template {
-                    if let Some(template) = templates.get(template_name) {
-                        Ok((key, apply_defaults(&config.base, template, &raw_templates)?))
-                    } else {
-                        Err(anyhow!("unknown template: {}", template_name))
-                    }
-                } else {
-                    Ok((
-                        key,
-                        apply_defaults(&config.base, &VolumeConfig::default(), &raw_templates)?,
-                    ))
-                }
-            })
-            .collect::<Result<HashMap<CompactString, VolumeConfig>>>()?,
+        volume_config,
     })
 }
 
@@ -551,9 +573,14 @@ hourly = 72
 daily = 30
 
 ["tank/data"]
+hourly = 1
+daily = 1
 replication = { template = "backup", dataset = "backup/tank/data" }
 
 ["tank/logs"]
+hourly = 1
+daily = 1
+monthly = 1
 replication = { template = "backup", dataset = "backup/tank/logs", hourly = 12, monthly = 3 }
         "#;
 
@@ -606,6 +633,50 @@ replication = { template = "backup", dataset = "backup/tank/data" }
         assert_eq!(volume.daily, 7);
         assert_eq!(volume.replication.as_ref().unwrap().hourly, 24);
         assert_eq!(volume.replication.as_ref().unwrap().daily, 7);
+    }
+
+    #[test]
+    fn load_config_rejects_replication_retention_without_local_retention() {
+        const TEST_CONFIG: &str = r#"
+["tank/data"]
+replication = { host = "backup.example.com", dataset = "backup/tank/data", daily = 30 }
+        "#;
+
+        assert_eq!(
+            "replication retention for tank/data daily is 30, but local daily retention is 0",
+            load_config(TEST_CONFIG).unwrap_err().to_string()
+        );
+    }
+
+    #[test]
+    fn load_config_allows_zero_replication_retention_with_zero_local_retention() {
+        const TEST_CONFIG: &str = r#"
+["tank/data"]
+replication = { host = "backup.example.com", dataset = "backup/tank/data" }
+        "#;
+
+        let config = load_config(TEST_CONFIG).unwrap();
+        let volume = config.volume_config.get("tank/data").unwrap();
+
+        assert_eq!(volume.daily, 0);
+        assert_eq!(volume.replication.as_ref().unwrap().daily, 0);
+    }
+
+    #[test]
+    fn load_config_rejects_template_replication_retention_without_local_retention() {
+        const TEST_CONFIG: &str = r#"
+[templates.backup]
+host = "backup.example.com"
+daily = 30
+
+["tank/data"]
+replication = { template = "backup", dataset = "backup/tank/data" }
+        "#;
+
+        assert_eq!(
+            "replication retention for tank/data daily is 30, but local daily retention is 0",
+            load_config(TEST_CONFIG).unwrap_err().to_string()
+        );
     }
 
     #[test]
