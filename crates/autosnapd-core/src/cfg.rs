@@ -186,22 +186,27 @@ pub fn load_config(data: &str) -> Result<Config> {
         defaults: &VolumeConfig,
         templates: &HashMap<CompactString, RawBaseVolumeConfig>,
     ) -> Result<VolumeConfig> {
-        Ok(VolumeConfig {
+        let mut resolved = VolumeConfig {
             minutely: cfg.minutely.unwrap_or(defaults.minutely),
             hourly: cfg.hourly.unwrap_or(defaults.hourly),
             daily: cfg.daily.unwrap_or(defaults.daily),
             monthly: cfg.monthly.unwrap_or(defaults.monthly),
             yearly: cfg.yearly.unwrap_or(defaults.yearly),
             source: cfg.source.clone().or_else(|| defaults.source.clone()),
-            replication: match &cfg.replication {
-                Some(replication) => Some(resolve_replication(replication, templates)?),
-                None => defaults.replication.clone(),
-            },
-        })
+            replication: None,
+        };
+
+        resolved.replication = match &cfg.replication {
+            Some(replication) => Some(resolve_replication(replication, &resolved, templates)?),
+            None => defaults.replication.clone(),
+        };
+
+        Ok(resolved)
     }
 
     fn resolve_replication(
         cfg: &RawReplicationConfig,
+        defaults: &VolumeConfig,
         templates: &HashMap<CompactString, RawBaseVolumeConfig>,
     ) -> Result<ReplicationConfig> {
         let template = match &cfg.template {
@@ -233,23 +238,23 @@ pub fn load_config(data: &str) -> Result<Config> {
             minutely: cfg
                 .minutely
                 .or_else(|| template.and_then(|template| template.minutely))
-                .unwrap_or(0),
+                .unwrap_or(defaults.minutely),
             hourly: cfg
                 .hourly
                 .or_else(|| template.and_then(|template| template.hourly))
-                .unwrap_or(0),
+                .unwrap_or(defaults.hourly),
             daily: cfg
                 .daily
                 .or_else(|| template.and_then(|template| template.daily))
-                .unwrap_or(0),
+                .unwrap_or(defaults.daily),
             monthly: cfg
                 .monthly
                 .or_else(|| template.and_then(|template| template.monthly))
-                .unwrap_or(0),
+                .unwrap_or(defaults.monthly),
             yearly: cfg
                 .yearly
                 .or_else(|| template.and_then(|template| template.yearly))
-                .unwrap_or(0),
+                .unwrap_or(defaults.yearly),
         })
     }
 
@@ -611,6 +616,63 @@ replication = { template = "backup", dataset = "backup/tank/logs", hourly = 12, 
         assert_eq!(logs_replication.hourly, 12);
         assert_eq!(logs_replication.daily, 30);
         assert_eq!(logs_replication.monthly, 3);
+    }
+
+    #[test]
+    fn replica_time_units_default_to_local_config() {
+        const TEST_CONFIG: &str = r#"
+["tank/data"]
+minutely = 2
+hourly = 24
+daily = 7
+monthly = 3
+yearly = 1
+replication = { host = "backup.example.com", dataset = "backup/tank/data" }
+        "#;
+
+        let config = load_config(TEST_CONFIG).unwrap();
+        let replication = config
+            .volume_config
+            .get("tank/data")
+            .unwrap()
+            .replication
+            .as_ref()
+            .unwrap();
+
+        assert_eq!(replication.minutely, 2);
+        assert_eq!(replication.hourly, 24);
+        assert_eq!(replication.daily, 7);
+        assert_eq!(replication.monthly, 3);
+        assert_eq!(replication.yearly, 1);
+    }
+
+    #[test]
+    fn replica_time_units_apply_template_then_self_config() {
+        const TEST_CONFIG: &str = r#"
+[templates.backup]
+host = "backup.example.com"
+hourly = 72
+monthly = 12
+
+["tank/data"]
+hourly = 24
+daily = 7
+monthly = 3
+replication = { template = "backup", dataset = "backup/tank/data", monthly = 6 }
+        "#;
+
+        let config = load_config(TEST_CONFIG).unwrap();
+        let replication = config
+            .volume_config
+            .get("tank/data")
+            .unwrap()
+            .replication
+            .as_ref()
+            .unwrap();
+
+        assert_eq!(replication.hourly, 72);
+        assert_eq!(replication.daily, 7);
+        assert_eq!(replication.monthly, 6);
     }
 
     #[test]

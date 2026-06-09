@@ -30,25 +30,25 @@ hourly = 24
 daily = 7
 
 [templates.archive]
-daily = 60
 monthly = 60
 
 # A volume using a template, overriding the hourly retention
 ["tank/data"]
 template = "replicated_policy"
-hourly = 1 
+hourly = 1
 
 # A volume with its own specific rotation (no template)
 ["tank/logs"]
 daily = 30
 monthly = 12
 
-# A volume that runs a script before snapshotting and then syncing 
+# A volume that runs a script before snapshotting and then syncing
 ["tank/backup-prep"]
 daily = 7
+monthly = 1
 source = { type = "script", path = "/usr/local/bin/prepare-backup.sh", args = ["--target", "/mnt/data"] }
-# Snapshot retention is separately configured for the replica
-replication = { host = "backup-server", dataset = "backup/tank/data", template = "archive", daily = 120 }
+# Replica retention initially has the same configuration as the volume, but it can be further customized with "template" and individual time units
+replication = { host = "backup-server", dataset = "backup/tank/data", template = "archive" }
 
 # A volume using a remote rsync source
 ["tank/remote-sync"]
