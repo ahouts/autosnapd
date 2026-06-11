@@ -2,7 +2,7 @@ use crate::clock::{Clock, ClockImpl};
 use crate::remote::{DryReplicationApi, DrySourceApi, RemoteCommand, ReplicationApi, SourceApi};
 use crate::zfs::{DryZfsApi, ZfsApi, ZfsApiImpl};
 use anyhow::{Context, Result};
-use autosnapd_core::{Config, Snapshot, TimeUnit, VolumeConfig, cfg};
+use autosnapd_core::{Config, Snapshot, TimeUnit, VolumeConfig, cfg, is_dataset_missing_error};
 use chrono::{DateTime, Utc};
 use futures::FutureExt;
 use futures::lock::Mutex;
@@ -117,7 +117,24 @@ async fn handle_snapshots_for_volume<A: ZfsApi, C: Clock, S: SourceApi, P: Repli
     volume_config: &VolumeConfig,
     config: &Config,
 ) -> Result<()> {
-    let mut snapshots = zfs_api.snapshots(volume).await?;
+    let mut snapshots = match zfs_api.snapshots(volume).await {
+        Ok(snapshots) => snapshots,
+        // A prune_only volume is configured before the first replication
+        // creates it; treat the missing dataset as having no snapshots instead
+        // of failing the cycle.
+        Err(e)
+            if volume_config.prune_only
+                && e.chain()
+                    .any(|cause| is_dataset_missing_error(volume, &cause.to_string())) =>
+        {
+            log::debug!(
+                "volume {} does not exist yet, treating snapshot list as empty",
+                volume
+            );
+            Vec::new()
+        }
+        Err(e) => return Err(e),
+    };
     let mut snapshots_for_replication = snapshots.clone();
     sort_snapshots(&mut snapshots);
     let mut prune_work = Vec::new();
@@ -1193,6 +1210,93 @@ mod tests {
         .await;
 
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_missing_dataset_is_tolerated_for_prune_only_volume() {
+        let mut mock_zfs = MockZfsApi::new();
+        let mock_clock = MockClock::new();
+        let mock_source = MockSourceApi::new();
+        let mock_replication = MockReplicationApi::new();
+
+        mock_zfs
+            .expect_snapshots()
+            .with(eq("backup/tank/data"))
+            .times(1)
+            .returning(|_| {
+                Box::pin(async {
+                    Err(anyhow::anyhow!(
+                        "bad exit code from zfs [\"list\"]: 1\ncannot open 'backup/tank/data': dataset does not exist\n"
+                    ))
+                })
+            });
+
+        let volume_config = VolumeConfig {
+            hourly: 72,
+            prune_only: true,
+            ..VolumeConfig::default()
+        };
+
+        let config = Config {
+            snapshot_prefix: SnapshotPrefix(CompactString::from("autosnap")),
+            volume_config: HashMap::new(),
+        };
+
+        let result = handle_snapshots_for_volume(
+            &mock_zfs,
+            &mock_clock,
+            &mock_source,
+            &mock_replication,
+            "backup/tank/data",
+            &volume_config,
+            &config,
+        )
+        .await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_missing_dataset_fails_for_regular_volume() {
+        let mut mock_zfs = MockZfsApi::new();
+        let mock_clock = MockClock::new();
+        let mock_source = MockSourceApi::new();
+        let mock_replication = MockReplicationApi::new();
+
+        mock_zfs
+            .expect_snapshots()
+            .with(eq("tank/data"))
+            .times(1)
+            .returning(|_| {
+                Box::pin(async {
+                    Err(anyhow::anyhow!(
+                        "bad exit code from zfs [\"list\"]: 1\ncannot open 'tank/data': dataset does not exist\n"
+                    ))
+                })
+            });
+
+        let volume_config = VolumeConfig {
+            hourly: 1,
+            ..VolumeConfig::default()
+        };
+
+        let config = Config {
+            snapshot_prefix: SnapshotPrefix(CompactString::from("autosnap")),
+            volume_config: HashMap::new(),
+        };
+
+        let result = handle_snapshots_for_volume(
+            &mock_zfs,
+            &mock_clock,
+            &mock_source,
+            &mock_replication,
+            "tank/data",
+            &volume_config,
+            &config,
+        )
+        .await;
+
+        assert!(result.is_err());
     }
 
     fn replication_config() -> ReplicationConfig {

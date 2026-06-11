@@ -86,7 +86,7 @@ daily = 30
 Notes:
 
 * `prune_only` cannot be combined with `source` (configuration error). It can be combined with `replication` to chain replicas (A → B → C).
-* The dataset must exist before being listed as a `prune_only` volume; the first `zfs receive` from the sender creates it.
+* Configure the `prune_only` volume *before* the sender's first push: the SSH command filter only accepts operations on datasets configured as `prune_only` volumes, and the first `zfs receive` from the sender then creates the dataset. The daemon treats a configured-but-not-yet-created `prune_only` dataset as having no snapshots.
 * Pruning matches any snapshot of the form `<dataset>@<prefix>_<timestamp>_<unit>` regardless of the replica's `snapshot_prefix`, so the replica config does not need to mirror the sender's prefix.
 
 ## autosnapd-ssh-command
@@ -95,7 +95,18 @@ A security utility designed to be used with `sshd` to allow strictly controlled 
 
 The permitted commands are append-only: `zfs list` (snapshots), `zfs get receive_resume_token`, and `zfs receive -s -u`. `zfs destroy` is not permitted, so a compromised sender key cannot destroy data on the replica — snapshot retention on the replica is enforced locally by its own `autosnapd` instance using `prune_only` volumes.
 
-Note for upgrades: senders running a version older than 0.6.0 prune replicas remotely via `zfs destroy`; pointed at a 0.6.0+ replica, that command is rejected (the sender logs a non-fatal prune error each cycle until it is upgraded).
+Beyond the command allowlist, the filter validates every request against the replica's own `autosnapd` configuration (`--config`, default `/etc/autosnapd.toml`):
+
+* All commands are restricted to datasets configured as `prune_only` volumes on the replica.
+* A receive must name the snapshot it delivers (`zfs receive -s -u <dataset>@<snapshot>`), and the name must be canonical (`<prefix>_<UTC timestamp>_<unit>`).
+* The snapshot's timestamp must not be in the future (5 minutes of clock skew is tolerated — keep both hosts NTP-synced).
+* The snapshot must be at least one time unit newer than the newest existing snapshot of the same unit, so a compromised sender cannot flood the replica or push the retention window around.
+* A receive without a snapshot name is only accepted while the dataset holds a `receive_resume_token`, i.e. to resume an interrupted (already validated) stream.
+
+Notes for upgrades:
+
+* 0.7.0 changes the replication protocol: senders name the received snapshot (`zfs receive -s -u <dataset>@<snapshot>`). Sender and replica must be upgraded together — older senders are rejected by a 0.7.0 filter, and older filters reject 0.7.0 senders. The replica must also list every replicated dataset as a `prune_only` volume before the first push.
+* Senders running a version older than 0.6.0 prune replicas remotely via `zfs destroy`; pointed at a 0.6.0+ replica, that command is rejected (the sender logs a non-fatal prune error each cycle until it is upgraded).
 
 ### Secure SSH Configuration
 
@@ -103,7 +114,7 @@ To use this utility for a dedicated `zfs` user, add the following to your `/etc/
 
 ```ssh
 Match User zfs
-    ForceCommand /usr/bin/autosnapd-ssh-command
+    ForceCommand /usr/bin/autosnapd-ssh-command --config /etc/autosnapd.toml
     PermitTTY no
     X11Forwarding no
     AllowTcpForwarding no 

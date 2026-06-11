@@ -8,3 +8,5 @@ license.workspace = true
 [dependencies]
 autosnapd-core = { path = "../autosnapd-core" }
 anyhow.workspace = true
+chrono.workspace = true
+structopt.workspace = true

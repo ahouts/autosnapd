@@ -1,7 +1,8 @@
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use autosnapd_core::{
-    Snapshot, SourceConfig, remote_receive_args, remote_receive_resume_token_args,
+    Snapshot, SourceConfig, is_dataset_missing_error, parse_receive_resume_token,
+    remote_receive_args, remote_receive_resume_token_args, remote_receive_snapshot_args,
     remote_snapshot_list_args,
 };
 use std::collections::HashSet;
@@ -343,7 +344,7 @@ impl RemoteCommand {
         remote_dataset: &str,
         request: SendRequest<'_>,
     ) -> Result<()> {
-        let send_args = zfs_send_args(request);
+        let send_args = zfs_send_args(&request);
         let mut send_cmd = Command::new(&self.zfs_path);
         let mut send = send_cmd
             .args(&send_args)
@@ -353,7 +354,12 @@ impl RemoteCommand {
             .spawn()
             .with_context(|| format!("failed to execute zfs {:?}", send_args))?;
 
-        let remote_args = remote_receive_args(remote_dataset)?;
+        let remote_args = match &request {
+            SendRequest::Snapshot { snapshot, .. } => {
+                remote_receive_snapshot_args(remote_dataset, snapshot)?
+            }
+            SendRequest::ResumeToken(_) => remote_receive_args(remote_dataset)?,
+        };
         let mut receive = Command::new("ssh")
             .arg(remote_host)
             .args(remote_args)
@@ -449,7 +455,7 @@ enum SendRequest<'a> {
     ResumeToken(&'a str),
 }
 
-fn zfs_send_args(request: SendRequest<'_>) -> Vec<String> {
+fn zfs_send_args(request: &SendRequest<'_>) -> Vec<String> {
     match request {
         SendRequest::Snapshot { parent, snapshot } => {
             let mut args = vec![String::from("send"), String::from("-w")];
@@ -464,21 +470,6 @@ fn zfs_send_args(request: SendRequest<'_>) -> Vec<String> {
             vec![String::from("send"), String::from("-t"), token.to_string()]
         }
     }
-}
-
-fn parse_receive_resume_token(output: &str) -> Option<String> {
-    let token = output.trim();
-    if token.is_empty() || token == "-" {
-        None
-    } else {
-        Some(token.to_string())
-    }
-}
-
-fn is_dataset_missing_error(dataset: &str, stderr: &str) -> bool {
-    stderr
-        .lines()
-        .any(|line| line.trim() == format!("cannot open '{}': dataset does not exist", dataset))
 }
 
 fn snapshot_key(snapshot: &Snapshot) -> String {
@@ -692,7 +683,7 @@ mod tests {
                 "-w".to_string(),
                 "tank/data@autosnap_2021-06-14T03:01:01Z_hourly".to_string()
             ],
-            zfs_send_args(SendRequest::Snapshot {
+            zfs_send_args(&SendRequest::Snapshot {
                 parent: None,
                 snapshot: &snapshot
             })
@@ -712,7 +703,7 @@ mod tests {
                 "tank/data@autosnap_2021-06-14T03:01:01Z_hourly".to_string(),
                 "tank/data@autosnap_2021-06-14T03:02:01Z_hourly".to_string()
             ],
-            zfs_send_args(SendRequest::Snapshot {
+            zfs_send_args(&SendRequest::Snapshot {
                 parent: Some(&parent),
                 snapshot: &snapshot
             })
@@ -729,12 +720,12 @@ mod tests {
                 "-t".to_string(),
                 "resume-token".to_string()
             ],
-            zfs_send_args(SendRequest::ResumeToken("resume-token"))
+            zfs_send_args(&SendRequest::ResumeToken("resume-token"))
         );
     }
 
     #[test]
-    fn zfs_receive_args_uses_resumable_unmounted_receive() {
+    fn resume_receive_args_use_plain_resumable_unmounted_receive() {
         assert_eq!(
             vec![
                 "zfs".to_string(),
@@ -748,42 +739,19 @@ mod tests {
     }
 
     #[test]
-    fn parse_receive_resume_token_handles_missing_tokens() {
-        assert_eq!(None, parse_receive_resume_token("-\n"));
-        assert_eq!(None, parse_receive_resume_token("\n"));
-        assert_eq!(None, parse_receive_resume_token("   \n"));
-    }
+    fn snapshot_receive_args_name_the_received_snapshot() {
+        let snapshot = test_snapshot("tank/data", 1);
 
-    #[test]
-    fn parse_receive_resume_token_returns_token() {
         assert_eq!(
-            Some("1-token-value".to_string()),
-            parse_receive_resume_token(" 1-token-value\n")
+            vec![
+                "zfs".to_string(),
+                "receive".to_string(),
+                "-s".to_string(),
+                "-u".to_string(),
+                "backup/tank/data@autosnap_2021-06-14T03:01:01Z_hourly".to_string()
+            ],
+            remote_receive_snapshot_args("backup/tank/data", &snapshot).unwrap()
         );
-    }
-
-    #[test]
-    fn is_dataset_missing_error_matches_requested_dataset() {
-        assert!(is_dataset_missing_error(
-            "vol/abc",
-            "cannot open 'vol/abc': dataset does not exist\n"
-        ));
-    }
-
-    #[test]
-    fn is_dataset_missing_error_ignores_other_datasets() {
-        assert!(!is_dataset_missing_error(
-            "vol/abc",
-            "cannot open 'vol/def': dataset does not exist\n"
-        ));
-    }
-
-    #[test]
-    fn is_dataset_missing_error_ignores_unrelated_errors() {
-        assert!(!is_dataset_missing_error(
-            "vol/abc",
-            "cannot open 'vol/abc': permission denied\n"
-        ));
     }
 
     fn test_snapshot(volume: &str, minute: u32) -> Snapshot {
