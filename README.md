@@ -29,8 +29,9 @@ snapshot_prefix = "autosnap"
 hourly = 24
 daily = 7
 
-[templates.archive]
-monthly = 60
+# A replication template only needs the connection details
+[templates.backup_target]
+host = "backup-server"
 
 # A volume using a template, overriding the hourly retention
 ["tank/data"]
@@ -47,13 +48,21 @@ monthly = 12
 daily = 7
 monthly = 1
 source = { type = "script", path = "/usr/local/bin/prepare-backup.sh", args = ["--target", "/mnt/data"] }
-# Replica retention initially has the same configuration as the volume, but it can be further customized with "template" and individual time units
-replication = { host = "backup-server", dataset = "backup/tank/data", template = "archive" }
+# Replication only pushes snapshots; retention on the replica is managed by
+# the replica host itself (see prune_only below)
+replication = { template = "backup_target", dataset = "backup/tank/data" }
 
 # A volume using a remote rsync source
 ["tank/remote-sync"]
 template = "replicated_policy"
 source = { type = "remote", host = "mirror.example.com", remote_path = "/mnt/mirror", local_path = "/mnt/local" }
+
+# A received replica dataset (on the backup server): never snapshotted,
+# only pruned down to the retention counts below
+["backup/tank/data"]
+prune_only = true
+hourly = 72
+daily = 30
 ```
 
 ### Scenarios
@@ -62,11 +71,31 @@ source = { type = "remote", host = "mirror.example.com", remote_path = "/mnt/mir
 Simply define the number of snapshots to keep for different time units (e.g., `daily = 7`). The daemon will automatically prune old local snapshots when the limit is exceeded.
 
 **Scenario 2: Secure Replication Workflow**
-Define a `source` that performs an `rsync` or `zfs send/receive` precursor, followed by a `replication` block. The daemon ensures the source command completes successfully before proceeding to take the snapshot and replicate it to the remote host.
+Define a `source` that performs an `rsync` or `zfs send/receive` precursor, followed by a `replication` block. The daemon ensures the source command completes successfully before proceeding to take the snapshot and replicate it to the remote host. The sender only ever pushes snapshots; it never deletes anything on the remote.
+
+**Scenario 3: Replica Host**
+The backup server runs its own `autosnapd` to enforce retention on received datasets. A `prune_only` volume is never snapshotted and never runs a source; on every cycle the daemon prunes each configured time unit down to the newest N snapshots. Time units left unset (or set to 0) are never touched.
+
+```toml
+["backup/tank/data"]
+prune_only = true
+hourly = 72
+daily = 30
+```
+
+Notes:
+
+* `prune_only` cannot be combined with `source` (configuration error). It can be combined with `replication` to chain replicas (A → B → C).
+* The dataset must exist before being listed as a `prune_only` volume; the first `zfs receive` from the sender creates it.
+* Pruning matches any snapshot of the form `<dataset>@<prefix>_<timestamp>_<unit>` regardless of the replica's `snapshot_prefix`, so the replica config does not need to mirror the sender's prefix.
 
 ## autosnapd-ssh-command
 
 A security utility designed to be used with `sshd` to allow strictly controlled ZFS operations via SSH. It only permits commands that match the format sent by the `autosnapd` replication engine, preventing arbitrary command execution.
+
+The permitted commands are append-only: `zfs list` (snapshots), `zfs get receive_resume_token`, and `zfs receive -s -u`. `zfs destroy` is not permitted, so a compromised sender key cannot destroy data on the replica — snapshot retention on the replica is enforced locally by its own `autosnapd` instance using `prune_only` volumes.
+
+Note for upgrades: senders running a version older than 0.6.0 prune replicas remotely via `zfs destroy`; pointed at a 0.6.0+ replica, that command is rejected (the sender logs a non-fatal prune error each cycle until it is upgraded).
 
 ### Secure SSH Configuration
 

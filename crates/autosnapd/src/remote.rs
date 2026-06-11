@@ -1,14 +1,13 @@
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use autosnapd_core::{
-    ReplicationConfig, Snapshot, SourceConfig, TimeUnit, remote_receive_args,
-    remote_receive_resume_token_args, remote_snapshot_list_args, remote_snapshot_remove_args,
+    Snapshot, SourceConfig, remote_receive_args, remote_receive_resume_token_args,
+    remote_snapshot_list_args,
 };
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::{ExitStatus, Stdio};
 use std::str::FromStr;
-use strum::IntoEnumIterator;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 
@@ -31,8 +30,6 @@ pub trait ReplicationApi {
         remote_dataset: &str,
         snapshots: &[Snapshot],
     ) -> Result<()>;
-
-    async fn prune_snapshots(&self, replication: &ReplicationConfig) -> Result<()>;
 }
 
 pub struct RemoteCommand {
@@ -195,32 +192,6 @@ impl ReplicationApi for RemoteCommand {
                     format!(
                         "error sending snapshot {} to {}:{}",
                         snapshot, remote_host, remote_dataset
-                    )
-                })?;
-        }
-
-        Ok(())
-    }
-
-    async fn prune_snapshots(&self, replication: &ReplicationConfig) -> Result<()> {
-        let mut snapshots = self
-            .remote_snapshots(&replication.host, &replication.dataset)
-            .await
-            .with_context(|| {
-                format!(
-                    "error listing remote snapshots for {}:{}",
-                    replication.host, replication.dataset
-                )
-            })?;
-        sort_snapshots(&mut snapshots);
-
-        for snapshot in remote_prune_plan(&snapshots, replication) {
-            self.remove_snapshot(&replication.host, &snapshot)
-                .await
-                .with_context(|| {
-                    format!(
-                        "error removing remote snapshot {} from {}:{}",
-                        snapshot, replication.host, replication.dataset
                     )
                 })?;
         }
@@ -442,39 +413,6 @@ impl RemoteCommand {
 
         Ok(())
     }
-
-    async fn remove_snapshot(&self, remote_host: &str, snapshot: &Snapshot) -> Result<()> {
-        log::info!("removing remote snapshot {}:{}", remote_host, snapshot);
-
-        let remote_args = remote_snapshot_remove_args(snapshot)?;
-        let mut cmd = Command::new("ssh")
-            .arg(remote_host)
-            .args(remote_args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .with_context(|| format!("failed to execute remote zfs destroy on {}", remote_host))?;
-
-        let mut stderr = String::new();
-        cmd.stderr
-            .as_mut()
-            .unwrap()
-            .read_to_string(&mut stderr)
-            .await
-            .with_context(|| "failed to read remote zfs destroy stderr")?;
-
-        let status = cmd.wait().await?;
-        if !status.success() {
-            return Err(anyhow!(
-                "remote zfs destroy failed with exit code {} and error:\n{}",
-                status.code().unwrap_or(-1),
-                stderr.trim()
-            ));
-        }
-
-        Ok(())
-    }
 }
 
 async fn wait_with_piped_output(
@@ -571,37 +509,6 @@ fn replication_plan(local: &[Snapshot], remote: &[Snapshot]) -> Vec<(Option<Snap
     plan
 }
 
-fn remote_prune_plan(snapshots: &[Snapshot], retention: &ReplicationConfig) -> Vec<Snapshot> {
-    let mut to_remove = Vec::new();
-
-    for time_unit in TimeUnit::iter() {
-        let desired_count = retention[time_unit] as usize;
-        if desired_count == 0 {
-            continue;
-        }
-
-        let group = snapshots_for_time_unit(snapshots, time_unit);
-        if group.len() > desired_count {
-            to_remove.extend_from_slice(&group[..group.len() - desired_count]);
-        }
-    }
-
-    to_remove
-}
-
-fn sort_snapshots(snapshots: &mut [Snapshot]) {
-    snapshots.sort_by_key(|snapshot| snapshot.date_time);
-    snapshots.sort_by_key(|snapshot| snapshot.time_unit);
-}
-
-fn snapshots_for_time_unit(snapshots: &[Snapshot], time_unit: TimeUnit) -> Vec<Snapshot> {
-    snapshots
-        .iter()
-        .filter(|snapshot| snapshot.time_unit == time_unit)
-        .cloned()
-        .collect()
-}
-
 pub struct DryReplicationApi<A: ReplicationApi>(pub A);
 
 pub struct DrySourceApi<A: SourceApi>(pub A);
@@ -632,20 +539,12 @@ impl<A: ReplicationApi + Send + Sync> ReplicationApi for DryReplicationApi<A> {
         );
         Ok(())
     }
-
-    async fn prune_snapshots(&self, replication: &ReplicationConfig) -> Result<()> {
-        log::info!(
-            "not pruning remote snapshots for {}:{}, dry run",
-            replication.host,
-            replication.dataset
-        );
-        Ok(())
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use autosnapd_core::TimeUnit;
     use chrono::{NaiveDate, TimeZone, Utc};
     use std::fs;
     use std::path::PathBuf;
@@ -887,52 +786,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn remote_prune_plan_keeps_newest_snapshots_for_time_unit() {
-        let first = test_snapshot("backup/tank/data", 1);
-        let second = test_snapshot("backup/tank/data", 2);
-        let third = test_snapshot("backup/tank/data", 3);
-
-        assert_eq!(
-            vec![first],
-            remote_prune_plan(
-                &[test_snapshot("backup/tank/data", 1), second, third],
-                &replication_config(2, 0)
-            )
-        );
-    }
-
-    #[test]
-    fn remote_prune_plan_zero_retention_skips_time_unit() {
-        assert_eq!(
-            Vec::<Snapshot>::new(),
-            remote_prune_plan(
-                &[
-                    test_snapshot("backup/tank/data", 1),
-                    test_snapshot("backup/tank/data", 2)
-                ],
-                &replication_config(0, 0)
-            )
-        );
-    }
-
-    #[test]
-    fn remote_prune_plan_prunes_remote_only_snapshots() {
-        let old_remote_only = test_snapshot_with_unit("backup/tank/data", 1, TimeUnit::Day);
-        let current = test_snapshot_with_unit("backup/tank/data", 2, TimeUnit::Day);
-
-        assert_eq!(
-            vec![old_remote_only],
-            remote_prune_plan(
-                &[
-                    test_snapshot_with_unit("backup/tank/data", 1, TimeUnit::Day),
-                    current
-                ],
-                &replication_config(0, 1)
-            )
-        );
-    }
-
     fn test_snapshot(volume: &str, minute: u32) -> Snapshot {
         test_snapshot_with_unit(volume, minute, TimeUnit::Hour)
     }
@@ -948,18 +801,6 @@ mod tests {
                     .unwrap(),
             ),
             time_unit,
-        }
-    }
-
-    fn replication_config(hourly: u16, daily: u16) -> ReplicationConfig {
-        ReplicationConfig {
-            host: "backup.example.com".into(),
-            dataset: "backup/tank/data".into(),
-            minutely: 0,
-            hourly,
-            daily,
-            monthly: 0,
-            yearly: 0,
         }
     }
 }

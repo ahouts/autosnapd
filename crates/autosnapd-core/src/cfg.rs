@@ -9,7 +9,6 @@ use serde::{Deserialize, Deserializer};
 use std::collections::HashMap;
 use std::ops::Index;
 use std::str::FromStr;
-use strum::IntoEnumIterator;
 
 #[derive(Debug, Eq, PartialEq, Hash)]
 pub struct SnapshotPrefix(pub CompactString);
@@ -77,25 +76,6 @@ pub enum SourceConfig {
 pub struct ReplicationConfig {
     pub host: CompactString,
     pub dataset: CompactString,
-    pub minutely: u16,
-    pub hourly: u16,
-    pub daily: u16,
-    pub monthly: u16,
-    pub yearly: u16,
-}
-
-impl Index<TimeUnit> for ReplicationConfig {
-    type Output = u16;
-
-    fn index(&self, index: TimeUnit) -> &Self::Output {
-        match index {
-            TimeUnit::Minute => &self.minutely,
-            TimeUnit::Hour => &self.hourly,
-            TimeUnit::Day => &self.daily,
-            TimeUnit::Month => &self.monthly,
-            TimeUnit::Year => &self.yearly,
-        }
-    }
 }
 
 #[derive(Deserialize)]
@@ -126,6 +106,7 @@ struct RawBaseVolumeConfig {
     replication: Option<RawReplicationConfig>,
     host: Option<CompactString>,
     dataset: Option<CompactString>,
+    prune_only: Option<bool>,
     minutely: Option<u16>,
     hourly: Option<u16>,
     daily: Option<u16>,
@@ -139,11 +120,6 @@ struct RawReplicationConfig {
     template: Option<CompactString>,
     host: Option<CompactString>,
     dataset: Option<CompactString>,
-    minutely: Option<u16>,
-    hourly: Option<u16>,
-    daily: Option<u16>,
-    monthly: Option<u16>,
-    yearly: Option<u16>,
 }
 
 #[derive(Debug, Eq, PartialEq, Default, Clone)]
@@ -153,6 +129,7 @@ pub struct VolumeConfig {
     pub daily: u16,
     pub monthly: u16,
     pub yearly: u16,
+    pub prune_only: bool,
     pub source: Option<SourceConfig>,
     pub replication: Option<ReplicationConfig>,
 }
@@ -192,12 +169,13 @@ pub fn load_config(data: &str) -> Result<Config> {
             daily: cfg.daily.unwrap_or(defaults.daily),
             monthly: cfg.monthly.unwrap_or(defaults.monthly),
             yearly: cfg.yearly.unwrap_or(defaults.yearly),
+            prune_only: cfg.prune_only.unwrap_or(defaults.prune_only),
             source: cfg.source.clone().or_else(|| defaults.source.clone()),
             replication: None,
         };
 
         resolved.replication = match &cfg.replication {
-            Some(replication) => Some(resolve_replication(replication, &resolved, templates)?),
+            Some(replication) => Some(resolve_replication(replication, templates)?),
             None => defaults.replication.clone(),
         };
 
@@ -206,7 +184,6 @@ pub fn load_config(data: &str) -> Result<Config> {
 
     fn resolve_replication(
         cfg: &RawReplicationConfig,
-        defaults: &VolumeConfig,
         templates: &HashMap<CompactString, RawBaseVolumeConfig>,
     ) -> Result<ReplicationConfig> {
         let template = match &cfg.template {
@@ -232,46 +209,15 @@ pub fn load_config(data: &str) -> Result<Config> {
         validate_dataset_name(&dataset)
             .with_context(|| format!("invalid replication dataset: {}", dataset))?;
 
-        Ok(ReplicationConfig {
-            host,
-            dataset,
-            minutely: cfg
-                .minutely
-                .or_else(|| template.and_then(|template| template.minutely))
-                .unwrap_or(defaults.minutely),
-            hourly: cfg
-                .hourly
-                .or_else(|| template.and_then(|template| template.hourly))
-                .unwrap_or(defaults.hourly),
-            daily: cfg
-                .daily
-                .or_else(|| template.and_then(|template| template.daily))
-                .unwrap_or(defaults.daily),
-            monthly: cfg
-                .monthly
-                .or_else(|| template.and_then(|template| template.monthly))
-                .unwrap_or(defaults.monthly),
-            yearly: cfg
-                .yearly
-                .or_else(|| template.and_then(|template| template.yearly))
-                .unwrap_or(defaults.yearly),
-        })
+        Ok(ReplicationConfig { host, dataset })
     }
 
-    fn validate_replication_retention(volume: &str, config: &VolumeConfig) -> Result<()> {
-        if let Some(replication) = &config.replication {
-            for time_unit in TimeUnit::iter() {
-                let replication_count = replication[time_unit];
-                if replication_count > 0 && config[time_unit] == 0 {
-                    return Err(anyhow!(
-                        "replication retention for {} {} is {}, but local {} retention is 0",
-                        volume,
-                        time_unit,
-                        replication_count,
-                        time_unit
-                    ));
-                }
-            }
+    fn validate_prune_only(volume: &str, config: &VolumeConfig) -> Result<()> {
+        if config.prune_only && config.source.is_some() {
+            return Err(anyhow!(
+                "volume {} is prune_only but has a source configured",
+                volume
+            ));
         }
 
         Ok(())
@@ -305,7 +251,7 @@ pub fn load_config(data: &str) -> Result<Config> {
                 apply_defaults(&config.base, &VolumeConfig::default(), &raw_templates)?
             };
 
-            validate_replication_retention(&key, &resolved_config)?;
+            validate_prune_only(&key, &resolved_config)?;
             Ok((key, resolved_config))
         })
         .collect::<Result<HashMap<CompactString, VolumeConfig>>>()?;
@@ -527,14 +473,14 @@ daily = 1
         const TEST_CONFIG: &str = r#"
 [templates.replicated]
 hourly = 2
-replication = { host = "backup1.example.com", dataset = "backup/tank/data", hourly = 72, daily = 30 }
+replication = { host = "backup1.example.com", dataset = "backup/tank/data" }
 
 ["tank/data"]
 template = "replicated"
 daily = 7
 
 ["tank/logs"]
-replication = { host = "backup2.example.com", dataset = "backup/tank/logs", monthly = 12 }
+replication = { host = "backup2.example.com", dataset = "backup/tank/logs" }
 monthly = 3
         "#;
 
@@ -551,9 +497,6 @@ monthly = 3
             data_cfg.replication.as_ref().unwrap().dataset,
             "backup/tank/data"
         );
-        assert_eq!(data_cfg.replication.as_ref().unwrap().hourly, 72);
-        assert_eq!(data_cfg.replication.as_ref().unwrap().daily, 30);
-        assert_eq!(data_cfg.replication.as_ref().unwrap().monthly, 0);
 
         let logs_cfg = config.volume_config.get("tank/logs").unwrap();
         assert_eq!(logs_cfg.monthly, 3);
@@ -565,8 +508,6 @@ monthly = 3
             logs_cfg.replication.as_ref().unwrap().dataset,
             "backup/tank/logs"
         );
-        assert_eq!(logs_cfg.replication.as_ref().unwrap().hourly, 0);
-        assert_eq!(logs_cfg.replication.as_ref().unwrap().monthly, 12);
     }
 
     #[test]
@@ -574,8 +515,6 @@ monthly = 3
         const TEST_CONFIG: &str = r#"
 [templates.backup]
 host = "backup.example.com"
-hourly = 72
-daily = 30
 
 ["tank/data"]
 hourly = 1
@@ -586,7 +525,7 @@ replication = { template = "backup", dataset = "backup/tank/data" }
 hourly = 1
 daily = 1
 monthly = 1
-replication = { template = "backup", dataset = "backup/tank/logs", hourly = 12, monthly = 3 }
+replication = { template = "backup", dataset = "backup/tank/logs" }
         "#;
 
         let config = load_config(TEST_CONFIG).unwrap();
@@ -600,9 +539,6 @@ replication = { template = "backup", dataset = "backup/tank/logs", hourly = 12, 
             .unwrap();
         assert_eq!(data_replication.host, "backup.example.com");
         assert_eq!(data_replication.dataset, "backup/tank/data");
-        assert_eq!(data_replication.hourly, 72);
-        assert_eq!(data_replication.daily, 30);
-        assert_eq!(data_replication.monthly, 0);
 
         let logs_replication = config
             .volume_config
@@ -613,66 +549,6 @@ replication = { template = "backup", dataset = "backup/tank/logs", hourly = 12, 
             .unwrap();
         assert_eq!(logs_replication.host, "backup.example.com");
         assert_eq!(logs_replication.dataset, "backup/tank/logs");
-        assert_eq!(logs_replication.hourly, 12);
-        assert_eq!(logs_replication.daily, 30);
-        assert_eq!(logs_replication.monthly, 3);
-    }
-
-    #[test]
-    fn replica_time_units_default_to_local_config() {
-        const TEST_CONFIG: &str = r#"
-["tank/data"]
-minutely = 2
-hourly = 24
-daily = 7
-monthly = 3
-yearly = 1
-replication = { host = "backup.example.com", dataset = "backup/tank/data" }
-        "#;
-
-        let config = load_config(TEST_CONFIG).unwrap();
-        let replication = config
-            .volume_config
-            .get("tank/data")
-            .unwrap()
-            .replication
-            .as_ref()
-            .unwrap();
-
-        assert_eq!(replication.minutely, 2);
-        assert_eq!(replication.hourly, 24);
-        assert_eq!(replication.daily, 7);
-        assert_eq!(replication.monthly, 3);
-        assert_eq!(replication.yearly, 1);
-    }
-
-    #[test]
-    fn replica_time_units_apply_template_then_self_config() {
-        const TEST_CONFIG: &str = r#"
-[templates.backup]
-host = "backup.example.com"
-hourly = 72
-monthly = 12
-
-["tank/data"]
-hourly = 24
-daily = 7
-monthly = 3
-replication = { template = "backup", dataset = "backup/tank/data", monthly = 6 }
-        "#;
-
-        let config = load_config(TEST_CONFIG).unwrap();
-        let replication = config
-            .volume_config
-            .get("tank/data")
-            .unwrap()
-            .replication
-            .as_ref()
-            .unwrap();
-
-        assert_eq!(replication.hourly, 72);
-        assert_eq!(replication.daily, 7);
-        assert_eq!(replication.monthly, 6);
     }
 
     #[test]
@@ -693,25 +569,18 @@ replication = { template = "backup", dataset = "backup/tank/data" }
 
         assert_eq!(volume.hourly, 24);
         assert_eq!(volume.daily, 7);
-        assert_eq!(volume.replication.as_ref().unwrap().hourly, 24);
-        assert_eq!(volume.replication.as_ref().unwrap().daily, 7);
-    }
-
-    #[test]
-    fn load_config_rejects_replication_retention_without_local_retention() {
-        const TEST_CONFIG: &str = r#"
-["tank/data"]
-replication = { host = "backup.example.com", dataset = "backup/tank/data", daily = 30 }
-        "#;
-
         assert_eq!(
-            "replication retention for tank/data daily is 30, but local daily retention is 0",
-            load_config(TEST_CONFIG).unwrap_err().to_string()
+            volume.replication.as_ref().unwrap().host,
+            "backup.example.com"
+        );
+        assert_eq!(
+            volume.replication.as_ref().unwrap().dataset,
+            "backup/tank/data"
         );
     }
 
     #[test]
-    fn load_config_allows_zero_replication_retention_with_zero_local_retention() {
+    fn load_config_allows_replication_with_zero_local_retention() {
         const TEST_CONFIG: &str = r#"
 ["tank/data"]
 replication = { host = "backup.example.com", dataset = "backup/tank/data" }
@@ -721,23 +590,138 @@ replication = { host = "backup.example.com", dataset = "backup/tank/data" }
         let volume = config.volume_config.get("tank/data").unwrap();
 
         assert_eq!(volume.daily, 0);
-        assert_eq!(volume.replication.as_ref().unwrap().daily, 0);
+        assert_eq!(
+            volume.replication.as_ref().unwrap().host,
+            "backup.example.com"
+        );
     }
 
     #[test]
-    fn load_config_rejects_template_replication_retention_without_local_retention() {
+    fn replication_retention_fields_are_rejected() {
         const TEST_CONFIG: &str = r#"
-[templates.backup]
-host = "backup.example.com"
+["tank/data"]
+daily = 7
+replication = { host = "backup.example.com", dataset = "backup/tank/data", daily = 30 }
+        "#;
+
+        assert!(load_config(TEST_CONFIG).is_err());
+    }
+
+    #[test]
+    fn prune_only_volume_parses() {
+        const TEST_CONFIG: &str = r#"
+["backup/tank/data"]
+prune_only = true
+hourly = 72
 daily = 30
+        "#;
+
+        let config = load_config(TEST_CONFIG).unwrap();
+        let volume = config.volume_config.get("backup/tank/data").unwrap();
+
+        assert!(volume.prune_only);
+        assert_eq!(volume.hourly, 72);
+        assert_eq!(volume.daily, 30);
+    }
+
+    #[test]
+    fn prune_only_defaults_to_false() {
+        const TEST_CONFIG: &str = r#"
+["tank/data"]
+daily = 7
+        "#;
+
+        let config = load_config(TEST_CONFIG).unwrap();
+        let volume = config.volume_config.get("tank/data").unwrap();
+
+        assert!(!volume.prune_only);
+    }
+
+    #[test]
+    fn prune_only_inherited_from_template() {
+        const TEST_CONFIG: &str = r#"
+[templates.replica]
+prune_only = true
+hourly = 72
+
+["backup/tank/data"]
+template = "replica"
+        "#;
+
+        let config = load_config(TEST_CONFIG).unwrap();
+        let volume = config.volume_config.get("backup/tank/data").unwrap();
+
+        assert!(volume.prune_only);
+        assert_eq!(volume.hourly, 72);
+    }
+
+    #[test]
+    fn prune_only_disabled_by_volume_override() {
+        const TEST_CONFIG: &str = r#"
+[templates.replica]
+prune_only = true
+hourly = 72
 
 ["tank/data"]
-replication = { template = "backup", dataset = "backup/tank/data" }
+template = "replica"
+prune_only = false
+        "#;
+
+        let config = load_config(TEST_CONFIG).unwrap();
+        let volume = config.volume_config.get("tank/data").unwrap();
+
+        assert!(!volume.prune_only);
+    }
+
+    #[test]
+    fn prune_only_with_source_is_rejected() {
+        const TEST_CONFIG: &str = r#"
+["backup/tank/data"]
+prune_only = true
+daily = 7
+source = { type = "script", path = "/usr/local/bin/build-volume" }
         "#;
 
         assert_eq!(
-            "replication retention for tank/data daily is 30, but local daily retention is 0",
+            "volume backup/tank/data is prune_only but has a source configured",
             load_config(TEST_CONFIG).unwrap_err().to_string()
+        );
+    }
+
+    #[test]
+    fn prune_only_with_template_source_is_rejected() {
+        const TEST_CONFIG: &str = r#"
+[templates.sourced]
+source = { type = "script", path = "/usr/local/bin/build-volume" }
+daily = 7
+
+["backup/tank/data"]
+template = "sourced"
+prune_only = true
+        "#;
+
+        assert_eq!(
+            "volume backup/tank/data is prune_only but has a source configured",
+            load_config(TEST_CONFIG).unwrap_err().to_string()
+        );
+    }
+
+    #[test]
+    fn prune_only_with_replication_is_allowed() {
+        const TEST_CONFIG: &str = r#"
+["backup/tank/data"]
+prune_only = true
+daily = 7
+replication = { host = "offsite.example.com", dataset = "offsite/tank/data" }
+        "#;
+
+        let config = load_config(TEST_CONFIG).unwrap();
+        let volume = config.volume_config.get("backup/tank/data").unwrap();
+
+        assert!(volume.prune_only);
+        assert_eq!(
+            volume.replication.as_ref().unwrap().host,
+            "offsite.example.com"
         );
     }
 

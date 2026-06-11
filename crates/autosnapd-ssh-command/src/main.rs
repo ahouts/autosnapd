@@ -96,21 +96,12 @@ mod tests {
     }
 
     #[test]
-    fn parses_valid_destroy_command() {
-        let command = command_from_original(Some(
-            "zfs destroy backup/tank/data@autosnap_2021-06-14T03:21:01Z_hourly",
-        ))
-        .unwrap();
-
-        assert_eq!(
-            sudo_args(&command),
-            vec![
-                "-n",
-                "--",
-                "/usr/bin/zfs",
-                "destroy",
-                "backup/tank/data@autosnap_2021-06-14T03:21:01Z_hourly"
-            ]
+    fn rejects_destroy_command() {
+        assert!(
+            command_from_original(Some(
+                "zfs destroy backup/tank/data@autosnap_2021-06-14T03:21:01Z_hourly",
+            ))
+            .is_err()
         );
     }
 
