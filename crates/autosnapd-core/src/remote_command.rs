@@ -113,7 +113,10 @@ pub fn remote_receive_args(dataset: &str) -> Result<Vec<String>> {
     .ssh_args())
 }
 
-pub fn remote_receive_snapshot_args(remote_dataset: &str, snapshot: &Snapshot) -> Result<Vec<String>> {
+pub fn remote_receive_snapshot_args(
+    remote_dataset: &str,
+    snapshot: &Snapshot,
+) -> Result<Vec<String>> {
     validate_dataset_name(remote_dataset)?;
     let remote_snapshot = Snapshot {
         volume: CompactString::from(remote_dataset),

@@ -64,9 +64,9 @@ pub fn validate_replica_target(config: &Config, dataset: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::CompactString;
     use crate::cfg::load_config;
     use crate::time_unit::TimeUnit;
-    use crate::CompactString;
     use chrono::{NaiveDate, TimeZone};
     use std::str::FromStr;
 

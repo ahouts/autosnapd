@@ -11,8 +11,7 @@ pub use cfg::{
     VolumeConfig, load_config,
 };
 pub use receive_validation::{
-    max_clock_skew, validate_replica_target, validate_snapshot_spacing,
-    validate_snapshot_timestamp,
+    max_clock_skew, validate_replica_target, validate_snapshot_spacing, validate_snapshot_timestamp,
 };
 pub use remote_command::{
     RemoteZfsCommand, is_dataset_missing_error, parse_forced_remote_zfs_command,

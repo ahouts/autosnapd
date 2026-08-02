@@ -18,6 +18,8 @@ mod clock;
 mod remote;
 mod zfs;
 
+const CYCLE_INTERVAL: Duration = Duration::from_secs(60);
+
 #[derive(StructOpt)]
 #[structopt(name = "autosnapd", about = "zfs snapshot daemon")]
 struct Opt {
@@ -54,13 +56,19 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+fn cycle_interval() -> tokio::time::Interval {
+    let mut interval = tokio::time::interval(CYCLE_INTERVAL);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    interval
+}
+
 async fn main_loop<A: ZfsApi, S: SourceApi, P: ReplicationApi>(
     cfg: &Config,
     zfs_api: &A,
     source_api: &S,
     replication_api: &P,
 ) -> Result<()> {
-    let mut interval = tokio::time::interval(Duration::new(60, 0));
+    let mut interval = cycle_interval();
     let mut interrupt = Box::pin(tokio::signal::ctrl_c().fuse());
     let mutex = Mutex::new(());
 
@@ -346,6 +354,25 @@ mod tests {
     use mockall::Sequence;
     use mockall::predicate::eq;
     use std::collections::HashMap;
+
+    #[tokio::test(start_paused = true)]
+    async fn test_cycle_interval_delays_after_missed_ticks() {
+        let mut interval = cycle_interval();
+
+        interval.tick().await;
+        tokio::time::advance(Duration::from_secs(150)).await;
+        interval.tick().await;
+
+        let next_tick = interval.tick();
+        tokio::pin!(next_tick);
+        assert!(next_tick.as_mut().now_or_never().is_none());
+
+        tokio::time::advance(Duration::from_secs(59)).await;
+        assert!(next_tick.as_mut().now_or_never().is_none());
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+        next_tick.await;
+    }
 
     #[tokio::test]
     async fn test_is_snapshot_required_returns_true_for_empty_group() {
